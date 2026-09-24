@@ -181,6 +181,93 @@ export interface SplitsConfig {
 }
 
 /**
+ * A single historical one-time direct payment ("give") involving an address.
+ */
+export interface GiveRecord {
+  /** Unique identifier of the give event. */
+  id: string;
+  /** Stellar address that sent the funds. */
+  sender: string;
+  /** Stellar address that received the funds. */
+  receiver: string;
+  /** Stellar Asset Contract address of the token. */
+  token: string;
+  /** Amount transferred, in the token's base units. */
+  amount: bigint;
+  /** Ledger in which the give was included. */
+  ledger: number;
+  /** Unix timestamp (seconds) of the give. */
+  timestamp: number;
+}
+
+/**
+ * A Drips list owned by an address, as summarised on a profile.
+ */
+export interface DripsListSummary {
+  /** Unique list identifier. */
+  id: string;
+  /** Human-readable list name. */
+  name: string;
+  /** Stellar address that owns the list. */
+  owner: string;
+  /** Stellar Asset Contract address the list is funded with. */
+  token: string;
+  /** Number of active members. */
+  memberCount: number;
+}
+
+/**
+ * Aggregated activity for a single address, returned by
+ * `VestflowClient.getProfile`.
+ *
+ * Addresses with no on-chain/indexed activity yield empty arrays, an empty
+ * splits config and zeroed totals.
+ */
+export interface ProfileSummary {
+  /** The queried Stellar address. */
+  address: string;
+  /** Network the profile was read from. */
+  network: "testnet" | "mainnet";
+  /** Outgoing streams opened by the address. */
+  streams: Stream[];
+  /** The address's current splits configuration. */
+  splits: SplitsConfig;
+  /** Recent give activity (sent or received) by the address. */
+  gives: GiveRecord[];
+  /** Drips lists owned by the address. */
+  dripsLists: DripsListSummary[];
+  /** Counts and totals — all zero for addresses with no activity. */
+  totals: {
+    /** Number of outgoing streams. */
+    streams: number;
+    /** Number of configured splits receivers. */
+    splitsReceivers: number;
+    /** Number of give records. */
+    gives: number;
+    /** Sum of give amounts sent by this address, in base units. */
+    totalGiven: bigint;
+    /** Number of Drips lists owned. */
+    dripsLists: number;
+  };
+}
+
+/**
+ * Error thrown by `getProfile` for invalid input or unexpected indexer
+ * responses. `status` mirrors the HTTP status the caller should treat it as
+ * (e.g. 400 for an invalid address).
+ */
+export class ProfileError extends Error {
+  /** HTTP-style status code associated with this failure. */
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ProfileError";
+    this.status = status;
+  }
+}
+
+/**
  * Parameters for creating a new vesting schedule.
  */
 export interface CreateScheduleParams {
