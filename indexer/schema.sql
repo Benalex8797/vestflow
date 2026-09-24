@@ -193,6 +193,11 @@ CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
   ON gives (sender, timestamp DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp
   ON gives (receiver, timestamp DESC, id DESC);
+-- GET /gives filtered by sender= or receiver= together with token=.
+CREATE INDEX IF NOT EXISTS idx_gives_sender_token_timestamp
+  ON gives (sender, token, timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_gives_receiver_token_timestamp
+  ON gives (receiver, token, timestamp DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS collected_totals (
   account                  TEXT NOT NULL,
@@ -419,6 +424,19 @@ CREATE TABLE IF NOT EXISTS analytics_watermark (
   network              TEXT PRIMARY KEY,
   last_ledger          INTEGER NOT NULL DEFAULT 0,
   last_materialized_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- Hourly per-token summary of active Drips streams, written by the
+-- materialization worker (analytics.ts) for the streaming TVL chart. Hours
+-- the worker did not run in carry the previous hour's values forward.
+-- Mirrors migrations/006_stream_hourly_snapshots.sql.
+CREATE TABLE IF NOT EXISTS stream_hourly_snapshots (
+  token               TEXT    NOT NULL,
+  hour                INTEGER NOT NULL, -- unix seconds at the start of the UTC hour
+  active_stream_count INTEGER NOT NULL DEFAULT 0,
+  total_rate_per_sec  TEXT    NOT NULL DEFAULT '0', -- bigint as string
+  total_balance       TEXT    NOT NULL DEFAULT '0', -- bigint as string
+  PRIMARY KEY (token, hour)
 );
 -- ── Gap Detection and Replay ─────────────────────────────────────────
 -- Tracks ledger ranges that need to be replayed when gaps are detected
