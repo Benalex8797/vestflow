@@ -1,9 +1,11 @@
-// Tests for receiveStreams, squeezeStreams, topUp, and withdraw (#864 / #846)
+// Tests for receiveStreams, squeezeStreams, topUp, and withdraw (#864 / #846 / #845)
 // 3 tests per method: happy-path, validation-rejection, network-error
 // No live network calls — all RPC interactions are mocked via vi.spyOn.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { nativeToScVal, scValToNative, type xdr } from "@stellar/stellar-sdk";
 import { VestflowClient } from "../src/client";
+import type { StreamsHistory } from "../src/types";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -11,7 +13,6 @@ import { VestflowClient } from "../src/client";
 
 const ACCOUNT = "GDZ2GDLBPUCEXA3I5U7WN5E3CNQ3JBP5FK464EMLTHPCX6KVB5N4A4YT";
 const TOKEN = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
-const RECEIVER = "GBPVBGQYWNHZNJUWGC7NKXHZQDMPWRQKPK6GXDLHM2PCYBDJZUYVB23";
 
 const signer = vi.fn().mockResolvedValue("signed-xdr");
 
@@ -97,52 +98,88 @@ describe("receiveStreams (#846)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// squeezeStreams (#864)
+// squeezeStreams (#845 / #864)
 // ---------------------------------------------------------------------------
 
-describe("squeezeStreams (#864)", () => {
+describe("squeezeStreams (#845 / #864)", () => {
+  const SENDER = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+  const history: StreamsHistory[] = [
+    {
+      receivers: [{ receiver: ACCOUNT, ratePerSec: 10n }],
+      updateTime: 1_000,
+      maxEnd: 90_000,
+    },
+  ];
+
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("happy path: returns squeezed amount and txHash when funds are squeezable", async () => {
+  it("squeeze: returns the collected amount and txHash", async () => {
     const client = makeClient();
 
-    // simulate throws → sentinel 1n → buildAndSend called
-    vi.spyOn(client as any, "simulate").mockRejectedValue(new Error("rpc"));
-    vi.spyOn(client as any, "buildAndSend").mockResolvedValue("squeeze-hash");
+    // Simulating squeeze_streams reports 5000 stroops collectable.
+    vi.spyOn(client as any, "simulate").mockResolvedValue(
+      nativeToScVal(5_000n, { type: "i128" })
+    );
+    const buildAndSendSpy = vi
+      .spyOn(client as any, "buildAndSend")
+      .mockResolvedValue("squeeze-hash");
 
-    const result = await client.squeezeStreams(ACCOUNT, TOKEN, RECEIVER, signer);
+    const result = await client.squeezeStreams(ACCOUNT, SENDER, TOKEN, history, signer);
 
-    expect(result.txHash).toBe("squeeze-hash");
-    expect(result.squeezed).toBe(0n); // sentinel path returns 0n for amount
+    expect(result).toEqual({ collected: 5_000n, txHash: "squeeze-hash" });
+    expect(buildAndSendSpy).toHaveBeenCalledWith(
+      ACCOUNT,
+      "squeeze_streams",
+      expect.any(Array),
+      signer
+    );
+
+    // The typed history is encoded as the contract's struct shape.
+    const args = buildAndSendSpy.mock.calls[0][2] as xdr.ScVal[];
+    expect(args.slice(0, 3).map((arg) => scValToNative(arg))).toEqual([
+      ACCOUNT,
+      SENDER,
+      TOKEN,
+    ]);
+    expect(scValToNative(args[3])).toEqual([
+      {
+        max_end: 90_000n,
+        receivers: [{ amt_per_sec: 10n, receiver: ACCOUNT }],
+        update_time: 1_000n,
+      },
+    ]);
   });
 
-  it("nothing to squeeze: returns zeros without submitting a transaction", async () => {
+  it("nothing to squeeze: returns 0n without submitting a transaction", async () => {
     const client = makeClient();
     const buildAndSendSpy = vi
       .spyOn(client as any, "buildAndSend")
       .mockResolvedValue("should-not-be-called");
 
-    // simulate resolves with a value that coerces to 0
-    vi.spyOn(client as any, "simulate").mockResolvedValue(0 as any);
+    vi.spyOn(client as any, "simulate").mockResolvedValue(
+      nativeToScVal(0n, { type: "i128" })
+    );
 
-    const result = await client.squeezeStreams(ACCOUNT, TOKEN, RECEIVER, signer);
+    const result = await client.squeezeStreams(ACCOUNT, SENDER, TOKEN, history, signer);
 
-    expect(result).toEqual({ squeezed: 0n, txHash: "" });
+    expect(result).toEqual({ collected: 0n, txHash: "" });
     expect(buildAndSendSpy).not.toHaveBeenCalled();
   });
 
   it("network error on buildAndSend propagates to the caller", async () => {
     const client = makeClient();
 
-    vi.spyOn(client as any, "simulate").mockRejectedValue(new Error("rpc"));
+    vi.spyOn(client as any, "simulate").mockResolvedValue(
+      nativeToScVal(5_000n, { type: "i128" })
+    );
     vi.spyOn(client as any, "buildAndSend").mockRejectedValue(
       new Error("squeeze network error")
     );
 
     await expect(
-      client.squeezeStreams(ACCOUNT, TOKEN, RECEIVER, signer)
+      client.squeezeStreams(ACCOUNT, SENDER, TOKEN, history, signer)
     ).rejects.toThrow("squeeze network error");
   });
 });
