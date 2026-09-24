@@ -87,6 +87,53 @@ export interface CollectResult {
 }
 
 /**
+ * Result returned by {@link VestflowClient.receiveStreams}.
+ *
+ * When no past cycles are pending the transaction is not submitted:
+ * `received` is `0n` and `txHash` is an empty string.
+ */
+export interface ReceiveStreamsResult {
+  /** Total tokens settled from past cycles, in stroops. */
+  received: bigint;
+  /** Transaction hash, or an empty string when no cycles were settled. */
+  txHash: string;
+}
+
+/**
+ * Result returned by {@link VestflowClient.squeezeStreams}.
+ *
+ * When nothing can be squeezed the transaction is not submitted:
+ * `squeezed` is `0n` and `txHash` is an empty string.
+ */
+export interface SqueezeStreamsResult {
+  /** Tokens recovered from the current in-progress cycle, in stroops. */
+  squeezed: bigint;
+  /** Transaction hash, or an empty string when nothing was squeezed. */
+  txHash: string;
+}
+
+/**
+ * Result returned by {@link VestflowClient.topUp}.
+ */
+export interface TopUpResult {
+  /** Transaction hash. */
+  txHash: string;
+}
+
+/**
+ * Result returned by {@link VestflowClient.withdraw}.
+ *
+ * When there is nothing to withdraw the transaction is not submitted:
+ * `withdrawn` is `0n` and `txHash` is an empty string.
+ */
+export interface WithdrawResult {
+  /** Tokens returned to the sender's wallet, in stroops. */
+  withdrawn: bigint;
+  /** Transaction hash, or an empty string when nothing was withdrawn. */
+  txHash: string;
+}
+
+/**
  * Configuration for the VestflowClient.
  */
 export interface VestflowConfig {

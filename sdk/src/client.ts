@@ -29,6 +29,10 @@ import type {
   ClaimDelegation,
   Stream,
   CollectResult,
+  ReceiveStreamsResult,
+  SqueezeStreamsResult,
+  TopUpResult,
+  WithdrawResult,
   TransactionResult,
   BalanceResult,
   SplitsConfig,
@@ -1547,9 +1551,208 @@ export class VestflowClient {
     return this.submitAndSettle(sender, "batch_give", args, signer);
   }
 
+  /**
+   * Settle all past drips cycles for an account/token pair, transferring
+   * accumulated streaming income into the account's collectable balance.
+   *
+   * Simulates the receivable amount first; if no past cycles are pending the
+   * transaction is **not** submitted and the method resolves with
+   * `{ received: 0n, txHash: "" }` — no gas is spent and no error is thrown.
+   *
+   * @param account - Stellar address whose past cycles to settle.
+   * @param token - Stellar Asset Contract address of the token.
+   * @param signer - Function that signs the transaction XDR.
+   * @param maxCycles - Maximum number of past cycles to process in one call.
+   *   Defaults to 100. Capped to avoid exceeding Soroban instruction limits.
+   * @returns `{ received, txHash }`. When nothing was settled, `txHash` is `""`
+   *   and `received` is `0n`.
+   */
+  async receiveStreams(
+    account: string,
+    token: string,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>,
+    maxCycles = 100
+  ): Promise<ReceiveStreamsResult> {
+    // Probe receivable amount before spending fees.
+    let receivable = 0n;
+    try {
+      const val = await this.simulate(
+        "receivable_streams",
+        [
+          nativeToScVal(account, { type: "address" }),
+          nativeToScVal(token, { type: "address" }),
+          nativeToScVal(maxCycles, { type: "u32" }),
+        ],
+        account
+      );
+      receivable = BigInt(scValToNative(val) ?? 0);
+    } catch {
+      // Contract may not expose `receivable_streams` view — proceed to submit.
+      receivable = 1n; // sentinel: proceed
+    }
+
+    // Nothing to settle — skip the transaction entirely.
+    if (receivable === 0n) {
+      return { received: 0n, txHash: "" };
+    }
+
+    const txHash = await this.buildAndSend(
+      account,
+      "receive_streams",
+      [
+        nativeToScVal(account, { type: "address" }),
+        nativeToScVal(token, { type: "address" }),
+        nativeToScVal(maxCycles, { type: "u32" }),
+      ],
+      signer
+    );
+
+    const received = receivable === 1n ? 0n : receivable;
+    return { received, txHash };
+  }
+
+  /**
+   * Recover tokens from the current in-progress drips cycle that have already
+   * been "squeezed" (i.e. the sender is stopping or modifying a stream
+   * mid-cycle).
+   *
+   * Simulates the squeezable amount first; if nothing can be squeezed the
+   * transaction is **not** submitted and the method resolves with
+   * `{ squeezed: 0n, txHash: "" }`.
+   *
+   * @param sender - Stellar address reclaiming funds from its own streams.
+   * @param token - Stellar Asset Contract address of the token.
+   * @param receiver - Address of the stream recipient to squeeze from.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns `{ squeezed, txHash }`. When nothing was squeezed, `txHash` is `""`.
+   */
+  async squeezeStreams(
+    sender: string,
+    token: string,
+    receiver: string,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<SqueezeStreamsResult> {
+    let squeezable = 0n;
+    try {
+      const val = await this.simulate(
+        "squeezable_streams",
+        [
+          nativeToScVal(sender, { type: "address" }),
+          nativeToScVal(token, { type: "address" }),
+          nativeToScVal(receiver, { type: "address" }),
+        ],
+        sender
+      );
+      squeezable = BigInt(scValToNative(val) ?? 0);
+    } catch {
+      squeezable = 1n; // sentinel: proceed
+    }
+
+    if (squeezable === 0n) {
+      return { squeezed: 0n, txHash: "" };
+    }
+
+    const txHash = await this.buildAndSend(
+      sender,
+      "squeeze_streams",
+      [
+        nativeToScVal(sender, { type: "address" }),
+        nativeToScVal(token, { type: "address" }),
+        nativeToScVal(receiver, { type: "address" }),
+      ],
+      signer
+    );
+
+    const squeezed = squeezable === 1n ? 0n : squeezable;
+    return { squeezed, txHash };
+  }
+
+  /**
+   * Add funds to an account's drips balance for a given token so outgoing
+   * streams can continue flowing.
+   *
+   * @param account - Stellar address topping up its own drips balance.
+   * @param token - Stellar Asset Contract address of the token to deposit.
+   * @param amount - Amount to deposit, in the token's base units. Must be > 0n.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns `{ txHash }` on success.
+   * @throws If `amount` is not positive.
+   */
+  async topUp(
+    account: string,
+    token: string,
+    amount: bigint,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<TopUpResult> {
+    if (amount <= 0n) {
+      throw new Error("amount must be greater than 0");
+    }
+
+    const txHash = await this.buildAndSend(
+      account,
+      "top_up",
+      [
+        nativeToScVal(account, { type: "address" }),
+        nativeToScVal(token, { type: "address" }),
+        nativeToScVal(amount, { type: "i128" }),
+      ],
+      signer
+    );
+
+    return { txHash };
+  }
+
+  /**
+   * Withdraw unused funds from an account's drips balance back to its wallet.
+   *
+   * Simulates the withdrawable amount first; if the balance is zero the
+   * transaction is **not** submitted and the method resolves with
+   * `{ withdrawn: 0n, txHash: "" }`.
+   *
+   * @param account - Stellar address withdrawing from its own drips balance.
+   * @param token - Stellar Asset Contract address of the token to withdraw.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns `{ withdrawn, txHash }`. When nothing was withdrawn, `txHash` is `""`.
+   */
+  async withdraw(
+    account: string,
+    token: string,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<WithdrawResult> {
+    let withdrawable = 0n;
+    try {
+      const val = await this.simulate(
+        "withdrawable",
+        [
+          nativeToScVal(account, { type: "address" }),
+          nativeToScVal(token, { type: "address" }),
+        ],
+        account
+      );
+      withdrawable = BigInt(scValToNative(val) ?? 0);
+    } catch {
+      withdrawable = 1n; // sentinel: proceed
+    }
+
+    if (withdrawable === 0n) {
+      return { withdrawn: 0n, txHash: "" };
+    }
+
+    const txHash = await this.buildAndSend(
+      account,
+      "withdraw",
+      [
+        nativeToScVal(account, { type: "address" }),
+        nativeToScVal(token, { type: "address" }),
+      ],
+      signer
+    );
+
+    const withdrawn = withdrawable === 1n ? 0n : withdrawable;
+    return { withdrawn, txHash };
+  }
+
   subscribeToSchedule(
-    id: number,
-    callback: (schedule: ScheduleData, claimable: bigint) => void | Promise<void>,
     options: {
       intervalMs?: number;
       publicKey?: string;
