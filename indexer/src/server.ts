@@ -27,6 +27,7 @@ import {
   queryDripsStreams,
   queryEvents,
   queryGives,
+  queryGivesForAccount,
   queryHistory,
 } from "./db";
 import type { EventQueryParams, GiveQueryParams } from "./types";
@@ -486,6 +487,66 @@ function handleGives(
   }
 }
 
+/**
+ * GET /profile/:address — aggregate an address's streams, splits, gives and
+ * Drips lists into a single profile payload. Addresses with no activity
+ * resolve to an empty profile (HTTP 200), not 404.
+ */
+function handleProfile(
+  res: http.ServerResponse,
+  address: string,
+  searchParams: URLSearchParams,
+): void {
+  if (!STELLAR_ADDRESS.test(address)) {
+    return json(res, 400, { error: "address must be a valid Stellar address" });
+  }
+  const network = networkParam(searchParams);
+  if (!network) {
+    return json(res, 400, { error: "network must be mainnet or testnet" });
+  }
+
+  try {
+    const streamsPage = queryDripsStreams({ account: address, limit: 100, network });
+    const splits = queryDripsSplits(address, network);
+    const gives = queryGivesForAccount(address, network);
+    const listsPage = queryDripsLists({ owner: address, limit: 100, network });
+
+    const streams = (streamsPage?.items ?? []).map((s) => ({
+      sender: address,
+      receiver: s.receiver,
+      token: s.token,
+      ratePerSec: s.rate_per_second,
+      maxEndTime: s.estimated_end_time ?? 0,
+    }));
+    const receivers = splits.receivers ?? [];
+    const lists = listsPage?.items ?? [];
+
+    const totalGiven = gives.reduce(
+      (acc, g) => acc + (g.sender === address ? BigInt(g.amount_stroops) : 0n),
+      0n,
+    );
+
+    return json(res, 200, {
+      address,
+      network,
+      streams,
+      splits: { receivers, hash: splits.hash ?? "" },
+      gives,
+      dripsLists: lists,
+      totals: {
+        streams: streams.length,
+        splitsReceivers: receivers.length,
+        gives: gives.length,
+        totalGiven: totalGiven.toString(),
+        dripsLists: lists.length,
+      },
+    });
+  } catch (error) {
+    console.error("[server] Profile query error:", error);
+    return json(res, 500, { error: "Query failed" });
+  }
+}
+
 export function createServer(): http.Server {
   return http.createServer(async (req, res) => {
     let url: URL;
@@ -548,6 +609,7 @@ export function createServer(): http.Server {
       /^\/analytics\/grantors\/([A-Z0-9]{56})\/summary$/,
     );
     const listMembersMatch = url.pathname.match(/^\/lists\/([^/]+)\/members$/);
+    const profileMatch = url.pathname.match(/^\/profile\/(G[A-Z2-7]{55})$/);
 
     switch (url.pathname) {
       case "/health":
@@ -596,6 +658,9 @@ export function createServer(): http.Server {
             decodeURIComponent(listMembersMatch[1]),
             url.searchParams,
           );
+        }
+        if (profileMatch) {
+          return handleProfile(res, profileMatch[1], url.searchParams);
         }
         return json(res, 404, {
           error: "Not found",

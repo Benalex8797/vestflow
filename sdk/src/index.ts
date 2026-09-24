@@ -17,7 +17,7 @@ export {
   formatRate,
 } from "./utils";
 export type { ScheduleSummary } from "./utils";
-export { isScheduleRevoked } from "./types";
+export { isScheduleRevoked, ProfileError } from "./types";
 export type {
   ScheduleData,
   RevokedSchedule,
@@ -36,6 +36,9 @@ export type {
   BalanceResult,
   SplitsReceiver,
   SplitsConfig,
+  GiveRecord,
+  DripsListSummary,
+  ProfileSummary,
 } from "./types";
 export { waitForTransaction, TimeoutError } from "./waitForTransaction";
 export type {
