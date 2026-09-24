@@ -2346,3 +2346,204 @@ export function updateDripsListTargetRate(params: {
     list: updated === "not_found" ? undefined : updated,
   };
 }
+
+// ── #828: GET /gives/:id ────────────────────────────────────────────────────
+
+/**
+ * A give's `id` is a Stellar event id, "<ledger>-<txIndex>-<eventIndex>" —
+ * not a plain integer. `tx_hash` is not currently captured by the indexer
+ * (see `InsertGiveRow` — only the event id, not the enclosing transaction
+ * hash, is stored), so it's always `null` here rather than fabricated.
+ */
+export function getGiveById(
+  id: string,
+  network?: NetworkName,
+): {
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount: string;
+  timestamp: number;
+  ledger: number;
+  tx_hash: null;
+} | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT id, sender, receiver, token, amount_stroops AS amount, ledger, timestamp
+       FROM gives WHERE id = ?`,
+    )
+    .get(id) as
+    | { id: string; sender: string; receiver: string; token: string; amount: string; ledger: number; timestamp: number }
+    | undefined;
+  if (!row) return null;
+  return { ...row, tx_hash: null };
+}
+
+// ── #830: GET /lists/search ─────────────────────────────────────────────────
+
+export function searchDripsLists(params: {
+  q: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsList> | null {
+  const q = params.q.trim();
+  if (!q) return { items: [], nextCursor: null };
+
+  // Offset-based cursor: simpler and sufficient at this table's expected
+  // size (a keyset cursor over a computed relevance column needs the
+  // relevance bucket encoded in the cursor and re-derived on every page,
+  // which isn't worth the complexity for a search result set this small).
+  let offset = 0;
+  if (params.cursor) {
+    const decoded = Buffer.from(params.cursor, "base64url").toString("utf8");
+    offset = Number(decoded);
+    if (!Number.isInteger(offset) || offset < 0) return null;
+  }
+
+  // Relevance: exact match (0) < starts-with (1) < contains (2). SQLite has
+  // no case-insensitive LIKE for non-ASCII, but names here are expected to
+  // be ASCII identifiers; LOWER() covers the common case.
+  const nameLower = "LOWER(l.name)";
+  const qLower = q.toLowerCase();
+  const relevance = `CASE
+    WHEN ${nameLower} = ? THEN 0
+    WHEN ${nameLower} LIKE ? THEN 1
+    ELSE 2
+  END`;
+
+  const limit = Math.min(Math.max(params.limit ?? 50, 1), 50);
+  const rows = getDb(params.network)
+    .prepare(
+      `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
+       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec,
+       COUNT(m.address) AS member_count
+     FROM drips_lists l
+     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
+     WHERE ${nameLower} LIKE ?
+     GROUP BY l.id
+     ORDER BY ${relevance} ASC, l.name ASC, l.id ASC
+     LIMIT ? OFFSET ?`,
+    )
+    .all(qLower, qLower, `${qLower}%`, `%${qLower}%`, limit + 1, offset) as DripsList[];
+
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  return {
+    items: page,
+    nextCursor: hasMore ? Buffer.from(String(offset + limit)).toString("base64url") : null,
+  };
+}
+
+// ── #831: GET /analytics/streams/flow ───────────────────────────────────────
+
+export interface StreamFlowDay {
+  day: string; // YYYY-MM-DD
+  new_streams_rate: string;
+  closed_streams_rate: string;
+}
+
+/**
+ * Daily new-stream (outflow) vs. closed-or-expired-stream (inflow) rate
+ * totals for a flow area chart. "Closed" covers both an explicit close
+ * (`ended_at` set) and natural expiry (past `estimated_end_time` with no
+ * explicit close) — both remove the stream's rate from circulation.
+ */
+export function getStreamFlowByDay(params: {
+  token?: string;
+  from?: string;
+  to?: string;
+  network?: NetworkName;
+}): StreamFlowDay[] {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const fromSec = params.from ? Math.floor(new Date(params.from).getTime() / 1000) : nowSec - 30 * 86400;
+  const toSec = params.to ? Math.floor(new Date(params.to).getTime() / 1000) : nowSec;
+
+  const tokenClause = params.token ? "AND token = ?" : "";
+  const tokenValue = params.token ? [params.token] : [];
+
+  const newRows = getDb(params.network)
+    .prepare(
+      `SELECT strftime('%Y-%m-%d', created_at, 'unixepoch') AS day,
+              SUM(CAST(rate_per_second AS REAL)) AS rate
+       FROM drips_streams
+       WHERE created_at >= ? AND created_at <= ? ${tokenClause}
+       GROUP BY day`,
+    )
+    .all(fromSec, toSec, ...tokenValue) as { day: string; rate: number }[];
+
+  const closedRows = getDb(params.network)
+    .prepare(
+      `SELECT strftime('%Y-%m-%d', closed_at, 'unixepoch') AS day,
+              SUM(CAST(rate_per_second AS REAL)) AS rate
+       FROM (
+         SELECT rate_per_second, token,
+                COALESCE(ended_at, CASE WHEN estimated_end_time <= ? THEN estimated_end_time END) AS closed_at
+         FROM drips_streams
+       )
+       WHERE closed_at IS NOT NULL AND closed_at >= ? AND closed_at <= ? ${tokenClause}
+       GROUP BY day`,
+    )
+    .all(nowSec, fromSec, toSec, ...tokenValue) as { day: string; rate: number }[];
+
+  const newByDay = new Map(newRows.map((r) => [r.day, r.rate]));
+  const closedByDay = new Map(closedRows.map((r) => [r.day, r.rate]));
+
+  // Gap-fill every day in [from, to] with zeros, even if no activity at all.
+  const days: StreamFlowDay[] = [];
+  for (let t = fromSec - (fromSec % 86400); t <= toSec; t += 86400) {
+    const day = new Date(t * 1000).toISOString().slice(0, 10);
+    days.push({
+      day,
+      new_streams_rate: String(newByDay.get(day) ?? 0),
+      closed_streams_rate: String(closedByDay.get(day) ?? 0),
+    });
+  }
+  return days;
+}
+
+// ── #832: GET /analytics/splits/distribution ────────────────────────────────
+
+export type SplitsReceiverBucket = "1" | "2" | "3-5" | "6-10" | "10+";
+
+export interface SplitsDistributionRow {
+  receiver_count_bucket: SplitsReceiverBucket;
+  account_count: number;
+}
+
+const SPLITS_BUCKETS: SplitsReceiverBucket[] = ["1", "2", "3-5", "6-10", "10+"];
+
+function bucketForReceiverCount(count: number): SplitsReceiverBucket | null {
+  if (count <= 0) return null;
+  if (count === 1) return "1";
+  if (count === 2) return "2";
+  if (count <= 5) return "3-5";
+  if (count <= 10) return "6-10";
+  return "10+";
+}
+
+/** Distribution of split-receiver-count across accounts with a configured splits/streams receiver set. */
+export function getSplitsDistribution(network?: NetworkName): SplitsDistributionRow[] {
+  const rows = getDb(network)
+    .prepare(`SELECT receivers_json FROM current_streams`)
+    .all() as { receivers_json: string }[];
+
+  const counts = new Map<SplitsReceiverBucket, number>(SPLITS_BUCKETS.map((b) => [b, 0]));
+  for (const row of rows) {
+    let receiverCount = 0;
+    try {
+      const parsed = JSON.parse(row.receivers_json);
+      if (Array.isArray(parsed)) receiverCount = parsed.length;
+    } catch {
+      continue;
+    }
+    const bucket = bucketForReceiverCount(receiverCount);
+    if (bucket) counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+  }
+
+  return SPLITS_BUCKETS.map((bucket) => ({
+    receiver_count_bucket: bucket,
+    account_count: counts.get(bucket) ?? 0,
+  }));
+}
