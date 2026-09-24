@@ -3,6 +3,8 @@ import { getDb } from "@/indexer/src/db";
 import { verifyFreighterSignature, isValidStellarAddress } from "@/lib/stellar-verify";
 import { generateJWT } from "@/lib/jwt";
 import { withLogging } from "@/lib/requestLogger";
+import { createErrorResponse } from "@/lib/apiError";
+import { createVersionedHandler } from "@/lib/versionedRoute";
 
 const NONCE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes (must match nonce generation)
 
@@ -24,17 +26,19 @@ export const POST = withLogging(async function POST(request: NextRequest): Promi
       typeof nonce !== "string" ||
       typeof signedMessage !== "string"
     ) {
-      return NextResponse.json(
-        { error: "publicKey, nonce, and signedMessage are required" },
-        { status: 400 }
+      return createErrorResponse(
+        400,
+        "publicKey, nonce, and signedMessage are required",
+        request
       );
     }
 
     // Validate Stellar address
     if (!isValidStellarAddress(publicKey)) {
-      return NextResponse.json(
-        { error: "Invalid Stellar address format" },
-        { status: 400 }
+      return createErrorResponse(
+        400,
+        "Invalid Stellar address format",
+        request
       );
     }
 
@@ -48,9 +52,10 @@ export const POST = withLogging(async function POST(request: NextRequest): Promi
       | undefined;
 
     if (!nonceRecord) {
-      return NextResponse.json(
-        { error: "Nonce not found or does not match public key" },
-        { status: 400 }
+      return createErrorResponse(
+        400,
+        "Nonce not found or does not match public key",
+        request
       );
     }
 
@@ -59,18 +64,20 @@ export const POST = withLogging(async function POST(request: NextRequest): Promi
     if (Date.now() > expiresAt) {
       // Clean up expired nonce
       db.prepare("DELETE FROM nonces WHERE nonce = ?").run(nonce);
-      return NextResponse.json(
-        { error: "Nonce has expired" },
-        { status: 400 }
+      return createErrorResponse(
+        400,
+        "Nonce has expired",
+        request
       );
     }
 
     // Verify signature
     const isValidSignature = verifyFreighterSignature(publicKey, nonce, signedMessage);
     if (!isValidSignature) {
-      return NextResponse.json(
-        { error: "Invalid signature" },
-        { status: 401 }
+      return createErrorResponse(
+        401,
+        "Invalid signature",
+        request
       );
     }
 
@@ -91,9 +98,12 @@ export const POST = withLogging(async function POST(request: NextRequest): Promi
     );
   } catch (error) {
     console.error("Error verifying signature:", error);
-    return NextResponse.json(
-      { error: "Failed to verify signature" },
-      { status: 500 }
+    return createErrorResponse(
+      500,
+      "Failed to verify signature",
+      request
     );
   }
 });
+
+export const POST_VERSIONED = createVersionedHandler(POST);

@@ -3,6 +3,8 @@ import { verifyJWT } from "@/lib/jwt";
 
 const REQUEST_START_HEADER = "x-request-start";
 const REQUEST_ID_HEADER = "x-request-id";
+const API_VERSION_HEADER = "x-api-version";
+const IS_DEPRECATED_HEADER = "x-is-deprecated";
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -34,14 +36,39 @@ function generateRequestId(): string {
   return crypto.randomUUID();
 }
 
+function getApiVersionInfo(pathname: string): {
+  pathname: string;
+  version: number;
+  isDeprecated: boolean;
+} {
+  if (pathname.startsWith("/api/v1/")) {
+    return { pathname, version: 1, isDeprecated: false };
+  }
+  if (pathname.startsWith("/api/v2/")) {
+    return { pathname, version: 2, isDeprecated: false };
+  }
+
+  // For non-versioned paths like /api/something, treat as v1 with deprecation
+  if (pathname.startsWith("/api/")) {
+    const versionedPath = pathname.replace("/api/", "/api/v1/");
+    return { pathname: versionedPath, version: 1, isDeprecated: true };
+  }
+
+  return { pathname, version: 1, isDeprecated: false };
+}
+
 export function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl;
+  let { pathname } = request.nextUrl;
 
   if (!pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
 
-  if (shouldExclude(pathname)) {
+  const { pathname: versionedPath, version, isDeprecated } = getApiVersionInfo(
+    pathname
+  );
+
+  if (shouldExclude(pathname) && !isDeprecated) {
     return NextResponse.next();
   }
 
@@ -53,11 +80,13 @@ export function middleware(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set(REQUEST_ID_HEADER, requestId);
   requestHeaders.set(REQUEST_START_HEADER, String(startMs));
+  requestHeaders.set(API_VERSION_HEADER, String(version));
+  requestHeaders.set(IS_DEPRECATED_HEADER, String(isDeprecated));
 
   // If write method and not in public path, verify auth
   if (
     WRITE_METHODS.has(request.method) &&
-    !PUBLIC_PATHS.some((path) => pathname.startsWith(path))
+    !PUBLIC_PATHS.some((path) => versionedPath.startsWith(path))
   ) {
     const authHeader = request.headers.get("authorization") || "";
     const [scheme, token] = authHeader.split(" ");
@@ -84,6 +113,10 @@ export function middleware(request: NextRequest) {
     requestHeaders.set("x-wallet-address", payload.sub);
   }
 
+  const nextRequest = versionedPath !== pathname
+    ? request.clone()
+    : request;
+
   const response = NextResponse.next({
     request: {
       headers: requestHeaders,
@@ -92,10 +125,22 @@ export function middleware(request: NextRequest) {
 
   // Set X-Request-ID on the response so the client can correlate
   response.headers.set(REQUEST_ID_HEADER, requestId);
+  response.headers.set("API-Version", String(version));
+
+  if (isDeprecated) {
+    const sunsetDate = new Date();
+    sunsetDate.setFullYear(sunsetDate.getFullYear() + 1);
+    response.headers.set("Deprecation", "true");
+    response.headers.set("Sunset", sunsetDate.toUTCString());
+    response.headers.set(
+      "Link",
+      `<https://docs.vestflow.dev/api/migration>; rel="deprecation"`
+    );
+  }
 
   return response;
 }
 
 export const config = {
-  matcher: "/api/:path*",
+  matcher: ["/api/:path*", "/api/v1/:path*"],
 };
