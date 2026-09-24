@@ -15,6 +15,7 @@ export {
   parseContractError,
   formatSchedule,
   formatRate,
+  formatCycleDuration,
 } from "./utils";
 export type { ScheduleSummary } from "./utils";
 export { isScheduleRevoked, ProfileError } from "./types";
@@ -43,6 +44,8 @@ export type {
   SplitsReceiver,
   SplitsConfig,
   GiveRecord,
+  GiveHistoryPage,
+  GiveHistoryOptions,
   DripsListSummary,
   ProfileSummary,
 } from "./types";
