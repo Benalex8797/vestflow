@@ -1783,6 +1783,113 @@ export function setAnalyticsWatermark(
     .run(network, ledger);
 }
 
+export interface StreamHourlySnapshotRow {
+  token: string;
+  hour: number;
+  active_stream_count: number;
+  total_rate_per_sec: string;
+  total_balance: string;
+}
+
+/**
+ * Current per-token totals across the Drips stream projections: streams
+ * still flowing at `nowSeconds` (same rule as GET /streams) and the streaming
+ * balances held in each token. A token whose streams have all ended is still
+ * returned, with zeros, so its hourly series drops to zero instead of
+ * stopping. Rates and balances are stored as strings, so they are summed as
+ * bigints here rather than with SQL SUM().
+ */
+export function getStreamTotalsByToken(
+  nowSeconds: number,
+  network?: NetworkName,
+): Omit<StreamHourlySnapshotRow, "hour">[] {
+  const db = getDb(network);
+  const totals = new Map<
+    string,
+    { active_stream_count: number; rate: bigint; balance: bigint }
+  >();
+  const totalFor = (token: string) => {
+    let total = totals.get(token);
+    if (!total) {
+      total = { active_stream_count: 0, rate: 0n, balance: 0n };
+      totals.set(token, total);
+    }
+    return total;
+  };
+
+  const tokens = db
+    .prepare("SELECT DISTINCT token FROM drips_streams")
+    .all() as { token: string }[];
+  for (const { token } of tokens) totalFor(token);
+
+  const active = db
+    .prepare(
+      `SELECT token, rate_per_second FROM drips_streams
+       WHERE ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+    )
+    .all(nowSeconds) as { token: string; rate_per_second: string }[];
+  for (const stream of active) {
+    const total = totalFor(stream.token);
+    total.active_stream_count++;
+    total.rate += BigInt(stream.rate_per_second);
+  }
+
+  const balances = db
+    .prepare("SELECT token, balance FROM drips_streaming_balances")
+    .all() as { token: string; balance: string }[];
+  for (const row of balances) {
+    totalFor(row.token).balance += BigInt(row.balance);
+  }
+
+  return [...totals].map(([token, total]) => ({
+    token,
+    active_stream_count: total.active_stream_count,
+    total_rate_per_sec: total.rate.toString(),
+    total_balance: total.balance.toString(),
+  }));
+}
+
+/** Most recent hourly stream snapshot for `token` before `hour`, used to fill gaps. */
+export function getStreamHourlySnapshotBefore(
+  token: string,
+  hour: number,
+  network?: NetworkName,
+): StreamHourlySnapshotRow | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT token, hour, active_stream_count, total_rate_per_sec, total_balance
+       FROM stream_hourly_snapshots
+       WHERE token = ? AND hour < ?
+       ORDER BY hour DESC LIMIT 1`,
+    )
+    .get(token, hour) as StreamHourlySnapshotRow | undefined;
+  return row ?? null;
+}
+
+export function upsertStreamHourlySnapshot(
+  row: StreamHourlySnapshotRow,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO stream_hourly_snapshots
+        (token, hour, active_stream_count, total_rate_per_sec, total_balance)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (token, hour) DO UPDATE SET
+         active_stream_count = excluded.active_stream_count,
+         total_rate_per_sec = excluded.total_rate_per_sec,
+         total_balance = excluded.total_balance`,
+    )
+    .run(
+      row.token,
+      row.hour,
+      row.active_stream_count,
+      row.total_rate_per_sec,
+      row.total_balance,
+    );
+}
+
 // ── Notifications ──────────────────────────────────────────────────────────
 
 export interface NotificationSubscription {

@@ -103,11 +103,11 @@ export interface ReceiveStreamsResult {
  * Result returned by {@link VestflowClient.squeezeStreams}.
  *
  * When nothing can be squeezed the transaction is not submitted:
- * `squeezed` is `0n` and `txHash` is an empty string.
+ * `collected` is `0n` and `txHash` is an empty string.
  */
 export interface SqueezeStreamsResult {
-  /** Tokens recovered from the current in-progress cycle, in stroops. */
-  squeezed: bigint;
+  /** Tokens collected from the current, unfinished cycle, in stroops. */
+  collected: bigint;
   /** Transaction hash, or an empty string when nothing was squeezed. */
   txHash: string;
 }
@@ -182,6 +182,31 @@ export interface Stream {
   ratePerSec: bigint;
   /** Unix timestamp (seconds) at which the stream stops. */
   maxEndTime: number;
+}
+
+/**
+ * A receiver in a sender's stream configuration, as recorded in
+ * {@link StreamsHistory}.
+ */
+export interface StreamReceiver {
+  /** Stellar address receiving the streamed tokens. */
+  receiver: string;
+  /** Constant flow rate in stroops (base units) per second. */
+  ratePerSec: bigint;
+}
+
+/**
+ * One entry of a sender's streams history: a receiver configuration and the
+ * window it was in effect for. Passed oldest first to
+ * {@link VestflowClient.squeezeStreams}.
+ */
+export interface StreamsHistory {
+  /** Receivers configured by this entry. */
+  receivers: StreamReceiver[];
+  /** Unix timestamp (seconds) at which this configuration took effect. */
+  updateTime: number;
+  /** Unix timestamp (seconds) at which this configuration's balance runs out. */
+  maxEnd: number;
 }
 
 /**

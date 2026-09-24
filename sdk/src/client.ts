@@ -28,6 +28,7 @@ import type {
   VestingKind,
   ClaimDelegation,
   Stream,
+  StreamsHistory,
   CollectResult,
   ReceiveStreamsResult,
   SqueezeStreamsResult,
@@ -1658,59 +1659,81 @@ export class VestflowClient {
   }
 
   /**
-   * Recover tokens from the current in-progress drips cycle that have already
-   * been "squeezed" (i.e. the sender is stopping or modifying a stream
-   * mid-cycle).
+   * Collect the tokens a sender has streamed to `account` so far in the
+   * current, unfinished drips cycle ("squeeze"), instead of waiting for the
+   * cycle to end. Wraps the `squeeze_streams` contract entry point.
    *
-   * Simulates the squeezable amount first; if nothing can be squeezed the
-   * transaction is **not** submitted and the method resolves with
-   * `{ squeezed: 0n, txHash: "" }`.
+   * The call is simulated first to learn how much it would collect; when that
+   * is nothing the transaction is **not** submitted and the method resolves
+   * with `{ collected: 0n, txHash: "" }` — no gas is spent.
    *
-   * @param sender - Stellar address reclaiming funds from its own streams.
-   * @param token - Stellar Asset Contract address of the token.
-   * @param receiver - Address of the stream recipient to squeeze from.
+   * @param account - Stellar address of the receiver collecting the tokens
+   *   (must sign the transaction).
+   * @param sender - Stellar address of the stream sender to squeeze from.
+   * @param token - Stellar Asset Contract address of the streamed token.
+   * @param history - The sender's streams history, oldest entry first.
    * @param signer - Function that signs the transaction XDR.
-   * @returns `{ squeezed, txHash }`. When nothing was squeezed, `txHash` is `""`.
+   * @returns `{ collected, txHash }`. When nothing was squeezed, `collected`
+   *   is `0n` and `txHash` is `""`.
    */
   async squeezeStreams(
+    account: string,
     sender: string,
     token: string,
-    receiver: string,
+    history: StreamsHistory[],
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<SqueezeStreamsResult> {
-    let squeezable = 0n;
-    try {
-      const val = await this.simulate(
-        "squeezable_streams",
-        [
-          nativeToScVal(sender, { type: "address" }),
-          nativeToScVal(token, { type: "address" }),
-          nativeToScVal(receiver, { type: "address" }),
-        ],
-        sender
-      );
-      squeezable = BigInt(scValToNative(val) ?? 0);
-    } catch {
-      squeezable = 1n; // sentinel: proceed
-    }
-
-    if (squeezable === 0n) {
-      return { squeezed: 0n, txHash: "" };
-    }
-
-    const txHash = await this.buildAndSend(
-      sender,
-      "squeeze_streams",
-      [
-        nativeToScVal(sender, { type: "address" }),
-        nativeToScVal(token, { type: "address" }),
-        nativeToScVal(receiver, { type: "address" }),
-      ],
-      signer
+    // Contract struct fields, in the sorted key order Soroban maps require.
+    const historyVal = xdr.ScVal.scvVec(
+      history.map((entry) =>
+        xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("max_end"),
+            val: nativeToScVal(entry.maxEnd, { type: "u64" }),
+          }),
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("receivers"),
+            val: xdr.ScVal.scvVec(
+              entry.receivers.map((r) =>
+                xdr.ScVal.scvMap([
+                  new xdr.ScMapEntry({
+                    key: xdr.ScVal.scvSymbol("amt_per_sec"),
+                    val: nativeToScVal(r.ratePerSec, { type: "i128" }),
+                  }),
+                  new xdr.ScMapEntry({
+                    key: xdr.ScVal.scvSymbol("receiver"),
+                    val: nativeToScVal(r.receiver, { type: "address" }),
+                  }),
+                ])
+              )
+            ),
+          }),
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("update_time"),
+            val: nativeToScVal(entry.updateTime, { type: "u64" }),
+          }),
+        ])
+      )
     );
 
-    const squeezed = squeezable === 1n ? 0n : squeezable;
-    return { squeezed, txHash };
+    const args: xdr.ScVal[] = [
+      nativeToScVal(account, { type: "address" }),
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(token, { type: "address" }),
+      historyVal,
+    ];
+
+    // Simulating the call returns the amount it would collect.
+    const val = await this.simulate("squeeze_streams", args, account);
+    const collected = BigInt(scValToNative(val) ?? 0);
+
+    // Nothing to squeeze — skip the transaction entirely.
+    if (collected === 0n) {
+      return { collected: 0n, txHash: "" };
+    }
+
+    const txHash = await this.buildAndSend(account, "squeeze_streams", args, signer);
+    return { collected, txHash };
   }
 
   /**
