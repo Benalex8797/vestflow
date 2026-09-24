@@ -17,6 +17,20 @@ interface SplitsConfig {
   hash: string;
 }
 
+function SplitsSkeleton() {
+  return (
+    <div className="card p-6 sm:p-8 space-y-6" role="status" aria-label="Loading splits configuration">
+      <div className="h-6 w-32 rounded bg-white/10 animate-pulse" />
+      <div className="h-48 rounded-xl bg-white/5 animate-pulse" />
+      <div className="space-y-3 border-t border-white/5 pt-4">
+        {Array.from({ length: 4 }, (_, index) => (
+          <div key={index} className="h-11 rounded bg-white/5 animate-pulse" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function SplitsPage() {
   const { publicKey } = useWallet();
   const [splits, setSplits] = useState<SplitsConfig | null>(null);
@@ -77,9 +91,7 @@ export default function SplitsPage() {
             Connect your wallet to view splits configuration.
           </div>
         ) : loading ? (
-          <div className="card p-12 text-center text-zinc-400 animate-pulse">
-            Loading splits configuration...
-          </div>
+          <SplitsSkeleton />
         ) : !splits || splits.receivers.length === 0 ? (
           <div className="card p-12 text-center text-zinc-400">
             No splits configured for this wallet.

@@ -199,6 +199,30 @@ export default function DripsListDetail({
           tokenSymbol={tokenSymbol}
         />
       </div>
+
+      <section className="card p-6 sm:p-8 space-y-4" aria-labelledby="recently-funded-heading">
+        <div>
+          <h2 id="recently-funded-heading" className="text-lg font-semibold text-white">Recently Funded By</h2>
+          <p className="text-sm text-zinc-500 mt-1">The five most recent funders recorded by the indexer.</p>
+        </div>
+        {members.length === 0 ? (
+          <p className="text-sm text-zinc-400">No recent funders found.</p>
+        ) : (
+          <div className="divide-y divide-white/5 border border-white/10 rounded-xl overflow-hidden bg-white/2">
+            {[...members].sort((a, b) => b.joined_at - a.joined_at).slice(0, 5).map((member) => (
+              <div key={member.address} className="p-3.5 flex items-center justify-between gap-4 text-sm">
+                <Link href={`/profile/${member.address}`} className="text-violet-300 hover:text-violet-200 transition-colors">
+                  <AddressLabel address={member.address} compact />
+                </Link>
+                <div className="text-right shrink-0">
+                  <p className="text-zinc-300 tabular-nums">{stroopsToXlm((BigInt(list.total_funding_rate_per_sec) / BigInt(Math.max(1, members.length))) * 86400n)} {tokenSymbol}/day</p>
+                  <p className="text-xs text-zinc-500">{member.joined_at > 0 ? new Date(member.joined_at * 1000).toLocaleDateString() : "Date unavailable"}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
