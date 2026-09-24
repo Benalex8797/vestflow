@@ -160,6 +160,22 @@ CREATE TABLE IF NOT EXISTS drips_streams (
 CREATE INDEX IF NOT EXISTS idx_drips_streams_active_account
   ON drips_streams (account, ended_at, estimated_end_time, created_at DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS stream_history (
+  id        TEXT PRIMARY KEY,
+  event_id  TEXT NOT NULL,
+  sender    TEXT NOT NULL,
+  receiver  TEXT NOT NULL,
+  token     TEXT NOT NULL,
+  ledger    INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  old_rate  TEXT NOT NULL,
+  new_rate  TEXT NOT NULL,
+  action    TEXT NOT NULL CHECK (action IN ('open', 'rate_change', 'close'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_stream_history_lookup
+  ON stream_history (sender, receiver, token, ledger, id);
+
 -- Current streaming balances are keyed by account and token. A zero balance
 -- is retained so the projection can be updated idempotently by the indexer.
 CREATE TABLE IF NOT EXISTS drips_streaming_balances (

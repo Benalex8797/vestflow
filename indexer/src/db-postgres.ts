@@ -2,8 +2,10 @@ import { Pool, PoolClient, QueryResult } from "pg";
 import fs from "fs";
 import path from "path";
 import type { EventQueryParams, IndexedEvent } from "./types";
+import { getDatabasePoolConfig } from "./config";
 
 const DB_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+const POOL_CONFIG = getDatabasePoolConfig();
 
 let pool: Pool | null = null;
 
@@ -16,8 +18,9 @@ export function getPool(): Pool {
     }
     pool = new Pool({
       connectionString: DB_URL,
-      max: 20,
-      idleTimeoutMillis: 30000,
+      min: POOL_CONFIG.min,
+      max: POOL_CONFIG.max,
+      idleTimeoutMillis: POOL_CONFIG.idleTimeoutMs,
       connectionTimeoutMillis: 2000,
     });
   }

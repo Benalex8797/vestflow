@@ -13,9 +13,58 @@ import {
   RPC_URL,
   NETWORK_PASSPHRASE,
 } from "@/lib/stellar";
+import {
+  getOrSetBalanceCache,
+  type BalanceCacheValue,
+} from "@/indexer/src/balance-cache";
 
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
-const FALLBACK_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+
+const emptyBalance = (): BalanceCacheValue => ({
+  streamingBalance: "0",
+  collectableAmount: "0",
+  streamingRatePerSec: "0",
+});
+
+async function fetchBalance(
+  account: string,
+  token: string,
+): Promise<BalanceCacheValue> {
+  try {
+    const server = new StellarRpc.Server(RPC_URL);
+    const contract = new Contract(CONTRACT_ID);
+    const accountData = await server.getAccount(account);
+    const tx = new TransactionBuilder(accountData, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        contract.call(
+          "streaming_balance",
+          nativeToScVal(account, { type: "address" }),
+          nativeToScVal(token, { type: "address" }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const result = await server.simulateTransaction(tx);
+    if (StellarRpc.Api.isSimulationError(result)) return emptyBalance();
+
+    const retval = (result as any).result?.retval;
+    if (!retval) return emptyBalance();
+
+    const native = scValToNative(retval) as any;
+    return {
+      streamingBalance: String(native?.streaming_balance ?? 0),
+      collectableAmount: String(native?.collectable_amount ?? 0),
+      streamingRatePerSec: String(native?.streaming_rate_per_sec ?? 0),
+    };
+  } catch (error) {
+    console.error("Error fetching streaming balance:", error);
+    return emptyBalance();
+  }
+}
 
 /**
  * GET /api/streams/balance?account=G...&token=G...
@@ -43,57 +92,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  try {
-    const server = new StellarRpc.Server(RPC_URL);
-    const contract = new Contract(CONTRACT_ID);
-    const source = account ?? FALLBACK_ACCOUNT;
+  const balance = await getOrSetBalanceCache(account, token, NETWORK, () =>
+    fetchBalance(account, token),
+  );
 
-    const accountData = await server.getAccount(source);
-    const tx = new TransactionBuilder(accountData, {
-      fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASE,
-    })
-      .addOperation(
-        contract.call(
-          "streaming_balance",
-          nativeToScVal(account, { type: "address" }),
-          nativeToScVal(token, { type: "address" }),
-        ),
-      )
-      .setTimeout(30)
-      .build();
-
-    const result = await server.simulateTransaction(tx);
-
-    if (StellarRpc.Api.isSimulationError(result)) {
-      return NextResponse.json(
-        { streamingBalance: "0", collectableAmount: "0", streamingRatePerSec: "0" },
-        { headers: { "Cache-Control": "public, max-age=5" } },
-      );
-    }
-
-    const retval = (result as any).result?.retval;
-    if (!retval) {
-      return NextResponse.json(
-        { streamingBalance: "0", collectableAmount: "0", streamingRatePerSec: "0" },
-        { headers: { "Cache-Control": "public, max-age=5" } },
-      );
-    }
-
-    const native = scValToNative(retval) as any;
-    return NextResponse.json(
-      {
-        streamingBalance: String(native?.streaming_balance ?? 0),
-        collectableAmount: String(native?.collectable_amount ?? 0),
-        streamingRatePerSec: String(native?.streaming_rate_per_sec ?? 0),
-      },
-      { headers: { "Cache-Control": "public, max-age=5" } },
-    );
-  } catch (error) {
-    console.error("Error fetching streaming balance:", error);
-    return NextResponse.json(
-      { streamingBalance: "0", collectableAmount: "0", streamingRatePerSec: "0" },
-      { headers: { "Cache-Control": "public, max-age=5" } },
-    );
-  }
+  return NextResponse.json(balance, {
+    headers: { "Cache-Control": "public, max-age=5" },
+  });
 }

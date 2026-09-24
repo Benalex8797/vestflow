@@ -2,13 +2,15 @@ import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import { createHash } from "node:crypto";
-import { parseNetwork, type NetworkName } from "./config";
+import { getDatabasePoolConfig, parseNetwork, type NetworkName } from "./config";
+import { invalidateBalanceCache } from "./balance-cache";
 import type {
   EventQueryParams,
   GiveQueryParams,
   IndexedEvent,
   StreamConfigDetails,
   StreamCycleRow,
+  StreamHistoryRow,
   SqueezeEventRow,
   TopReceiverRow,
   TvlStats,
@@ -166,13 +168,16 @@ function ensureEventDedupIndex(db: Database.Database): void {
     // Check if the deduplication index already exists
     const existingIndex = db
       .prepare(
-        `SELECT name FROM sqlite_master 
+        `SELECT name, sql FROM sqlite_master
          WHERE type = 'index' AND name = 'idx_event_dedup'`,
       )
-      .get() as { name: string } | undefined;
+      .get() as { name: string; sql: string | null } | undefined;
 
+    if (existingIndex?.sql?.includes("raw_value")) {
+      return;
+    }
     if (existingIndex) {
-      return; // Index already exists
+      db.exec("DROP INDEX idx_event_dedup");
     }
 
     console.log(
@@ -182,14 +187,16 @@ function ensureEventDedupIndex(db: Database.Database): void {
     // Create the deduplication index
     db.exec(`
       CREATE UNIQUE INDEX idx_event_dedup ON schedule_events (
-        ledger, 
-        event_type, 
-        COALESCE(schedule_id, -1), 
-        COALESCE(proposal_id, -1), 
-        COALESCE(grantor, ''), 
-        COALESCE(beneficiary, ''), 
-        COALESCE(amount, ''), 
-        COALESCE(token, '')
+        ledger,
+        event_type,
+        COALESCE(schedule_id, -1),
+        COALESCE(proposal_id, -1),
+        COALESCE(grantor, ''),
+        COALESCE(beneficiary, ''),
+        COALESCE(amount, ''),
+        COALESCE(token, ''),
+        raw_topics,
+        raw_value
       )
     `);
 
@@ -215,22 +222,26 @@ function ensureEventDedupIndex(db: Database.Database): void {
                    COALESCE(proposal_id, -1),
                    COALESCE(grantor, ''), 
                    COALESCE(beneficiary, ''), 
-                   COALESCE(amount, ''), 
-                   COALESCE(token, '')
+                   COALESCE(amount, ''),
+                   COALESCE(token, ''),
+                   raw_topics,
+                   raw_value
         )
       `);
 
       // Try creating the index again
       db.exec(`
         CREATE UNIQUE INDEX idx_event_dedup ON schedule_events (
-          ledger, 
-          event_type, 
-          COALESCE(schedule_id, -1), 
-          COALESCE(proposal_id, -1), 
-          COALESCE(grantor, ''), 
-          COALESCE(beneficiary, ''), 
-          COALESCE(amount, ''), 
-          COALESCE(token, '')
+          ledger,
+          event_type,
+          COALESCE(schedule_id, -1),
+          COALESCE(proposal_id, -1),
+          COALESCE(grantor, ''),
+          COALESCE(beneficiary, ''),
+          COALESCE(amount, ''),
+          COALESCE(token, ''),
+          raw_topics,
+          raw_value
         )
       `);
 
@@ -245,6 +256,7 @@ function ensureEventDedupIndex(db: Database.Database): void {
 }
 
 export function getDb(network = parseNetwork(undefined)): Database.Database {
+  getDatabasePoolConfig();
   let db = dbs.get(network);
   if (!db) {
     db = new Database(dbPathFor(network));
@@ -298,6 +310,20 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (account, token)
       );
+      CREATE TABLE IF NOT EXISTS stream_history (
+        id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        receiver TEXT NOT NULL,
+        token TEXT NOT NULL,
+        ledger INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        old_rate TEXT NOT NULL,
+        new_rate TEXT NOT NULL,
+        action TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_history_lookup
+        ON stream_history (sender, receiver, token, ledger, id);
       CREATE TABLE IF NOT EXISTS gives (
         id TEXT PRIMARY KEY,
         sender TEXT NOT NULL,
@@ -396,20 +422,323 @@ function eventTimestamp(row: InsertEventRow): number {
     : Math.floor(Date.now() / 1000);
 }
 
+function ensureStreamHistoryTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stream_history (
+      id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      receiver TEXT NOT NULL,
+      token TEXT NOT NULL,
+      ledger INTEGER NOT NULL,
+      timestamp INTEGER NOT NULL,
+      old_rate TEXT NOT NULL,
+      new_rate TEXT NOT NULL,
+      action TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_stream_history_lookup
+      ON stream_history (sender, receiver, token, ledger, id);
+    CREATE TABLE IF NOT EXISTS drips_streams (
+      id TEXT PRIMARY KEY,
+      account TEXT NOT NULL,
+      receiver TEXT NOT NULL,
+      token TEXT NOT NULL,
+      rate_per_second TEXT NOT NULL,
+      estimated_end_time INTEGER,
+      ended_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_drips_streams_active_account
+      ON drips_streams (account, ended_at, estimated_end_time, created_at DESC, id DESC);
+  `);
+}
+
+function parseStreamValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function streamString(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.trim() !== "") return value;
+  return null;
+}
+
+function streamRate(value: unknown): string | null {
+  const raw = streamString(value);
+  if (raw === null) return null;
+  try {
+    const rate = BigInt(raw);
+    return rate < 0n ? "0" : rate.toString();
+  } catch {
+    return null;
+  }
+}
+
+function streamEntry(
+  value: unknown,
+): { receiver: string; rate: string } | null {
+  if (Array.isArray(value)) {
+    const receiver = streamString(value[0]);
+    const rate = streamRate(value[1]);
+    return receiver && rate !== null ? { receiver, rate } : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const entry = value as Record<string, unknown>;
+  const receiver = streamString(
+    entry.receiver ?? entry.address ?? entry.account,
+  );
+  const rate = streamRate(
+    entry.rate_per_second ??
+      entry.ratePerSec ??
+      entry.new_rate ??
+      entry.amt_per_sec ??
+      entry.amount_per_second ??
+      entry.rate,
+  );
+  return receiver && rate !== null ? { receiver, rate } : null;
+}
+
+function parseStreamConfiguration(
+  row: InsertEventRow,
+): { sender: string; token: string; entries: Map<string, string>; full: boolean } | null {
+  const topicsValue = parseStreamValue(row.raw_topics);
+  const topics = Array.isArray(topicsValue) ? topicsValue : [];
+  const parsed = parseStreamValue(row.raw_value);
+  const parsedObject =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  const sender =
+    row.grantor ??
+    streamString(topics[1]) ??
+    (parsedObject ? streamString(parsedObject.sender ?? parsedObject.funder) : null);
+  const topicToken =
+    topics.length >= 4 ? streamString(topics[3]) : streamString(topics[2]);
+  const token =
+    row.token ??
+    topicToken ??
+    (parsedObject ? streamString(parsedObject.token) : null);
+  if (!sender || !token) return null;
+
+  const entries = new Map<string, string>();
+  let full = false;
+
+  const addEntries = (values: unknown[], replace: boolean): void => {
+    for (const value of values) {
+      const entry = streamEntry(value);
+      if (entry) entries.set(entry.receiver, entry.rate);
+    }
+    if (replace) full = true;
+  };
+
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) {
+      full = true;
+    } else if (parsed.every((value) => Array.isArray(value) || (value && typeof value === "object"))) {
+      addEntries(parsed, true);
+    }
+  } else if (parsed && typeof parsed === "object") {
+    const object = parsed as Record<string, unknown>;
+    const receiverList = object.receivers ?? object.stream_receivers ?? object.configuration;
+    if (Array.isArray(receiverList)) {
+      addEntries(receiverList, true);
+    } else {
+      const numericValues = Object.keys(object)
+        .filter((key) => /^\d+$/.test(key))
+        .sort((left, right) => Number(left) - Number(right))
+        .map((key) => object[key]);
+      if (numericValues.length > 0) {
+        addEntries(numericValues, true);
+      } else {
+        const entry = streamEntry(object);
+        if (entry) entries.set(entry.receiver, entry.rate);
+        else {
+          for (const [receiver, rate] of Object.entries(object)) {
+            const parsedRate = streamRate(rate);
+            if (parsedRate !== null) entries.set(receiver, parsedRate);
+          }
+          if (entries.size > 0) full = true;
+        }
+      }
+    }
+  }
+
+  if (entries.size === 0) {
+    const receiver = streamString(topics[2]);
+    const rate = Array.isArray(parsed)
+      ? streamRate(parsed[0])
+      : parsedObject
+        ? streamRate(
+            parsedObject.new_rate ??
+              parsedObject.rate_per_second ??
+              parsedObject.rate,
+          )
+        : streamRate(parsed);
+    if (receiver && topics.length >= 4 && rate !== null) {
+      entries.set(receiver, rate);
+    }
+  }
+
+  if (entries.size === 0 && !full) return null;
+  return { sender, token, entries, full };
+}
+
+function previousStreamRate(
+  db: Database.Database,
+  sender: string,
+  receiver: string,
+  token: string,
+  ledger: number,
+  eventId: string,
+): string {
+  const history = db
+    .prepare(
+      `SELECT new_rate FROM stream_history
+       WHERE sender = ? AND receiver = ? AND token = ?
+         AND (ledger < ? OR (ledger = ? AND id < ?))
+       ORDER BY ledger DESC, id DESC LIMIT 1`,
+    )
+    .get(sender, receiver, token, ledger, ledger, `${eventId}:${receiver}`) as
+    | { new_rate: string }
+    | undefined;
+  if (history?.new_rate != null) return history.new_rate;
+
+  const current = db
+    .prepare(
+      `SELECT rate_per_second FROM drips_streams
+       WHERE account = ? AND receiver = ? AND token = ?
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    )
+    .get(sender, receiver, token) as { rate_per_second: string } | undefined;
+  return current?.rate_per_second ?? "0";
+}
+
+function applyStreamState(
+  db: Database.Database,
+  row: InsertEventRow,
+  timestamp: number,
+): void {
+  const parsed = parseStreamConfiguration(row);
+  if (!parsed) return;
+
+  ensureStreamHistoryTable(db);
+  const activeRows = parsed.full
+    ? (db
+        .prepare(
+          `SELECT receiver, rate_per_second FROM drips_streams
+           WHERE account = ? AND token = ? AND ended_at IS NULL
+             AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+        )
+        .all(parsed.sender, parsed.token, timestamp) as {
+        receiver: string;
+        rate_per_second: string;
+      }[])
+    : [];
+
+  if (parsed.full) {
+    for (const active of activeRows) {
+      if (!parsed.entries.has(active.receiver)) {
+        parsed.entries.set(active.receiver, "0");
+      }
+    }
+  }
+
+  for (const [receiver, newRate] of parsed.entries) {
+    const oldRate = previousStreamRate(
+      db,
+      parsed.sender,
+      receiver,
+      parsed.token,
+      row.ledger,
+      row.id,
+    );
+    if (oldRate !== newRate) {
+      const action =
+        oldRate === "0" ? "open" : newRate === "0" ? "close" : "rate_change";
+      db.prepare(
+        `INSERT OR IGNORE INTO stream_history
+          (id, event_id, sender, receiver, token, ledger, timestamp, old_rate, new_rate, action)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        `${row.id}:${receiver}`,
+        row.id,
+        parsed.sender,
+        receiver,
+        parsed.token,
+        row.ledger,
+        timestamp,
+        oldRate,
+        newRate,
+        action,
+      );
+    }
+
+    const existing = db
+      .prepare(
+        `SELECT id FROM drips_streams
+         WHERE account = ? AND receiver = ? AND token = ? LIMIT 1`,
+      )
+      .get(parsed.sender, receiver, parsed.token) as { id: string } | undefined;
+    if (existing) {
+      db.prepare(
+        `UPDATE drips_streams
+         SET rate_per_second = ?, estimated_end_time = NULL,
+             ended_at = ?, created_at = CASE WHEN ? > 0 THEN ? ELSE created_at END
+         WHERE id = ?`,
+      ).run(
+        newRate,
+        newRate === "0" ? timestamp : null,
+        newRate === "0" ? 0 : 1,
+        timestamp,
+        existing.id,
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO drips_streams
+          (id, account, receiver, token, rate_per_second, estimated_end_time, ended_at, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+      ).run(
+        `${parsed.sender}:${receiver}:${parsed.token}`,
+        parsed.sender,
+        receiver,
+        parsed.token,
+        newRate,
+        newRate === "0" ? timestamp : null,
+        timestamp,
+      );
+    }
+  }
+}
+
 function applyEventProjection(
   db: Database.Database,
   row: InsertEventRow,
+  network?: NetworkName,
 ): void {
   const timestamp = eventTimestamp(row);
 
-  if (row.event_type === "stream_set" && row.grantor && row.token) {
-    db.prepare(
-      `INSERT INTO current_streams (account, token, receivers_json, updated_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(account, token) DO UPDATE SET
-         receivers_json = excluded.receivers_json,
-         updated_at = excluded.updated_at`,
-    ).run(row.grantor, row.token, row.raw_value, timestamp);
+  if (row.event_type === "squeezed" && row.beneficiary && row.token) {
+    invalidateBalanceCache(row.beneficiary, row.token, network);
+  }
+
+  if (row.event_type === "stream_set") {
+    applyStreamState(db, row, timestamp);
+    if (row.grantor && row.token) {
+      db.prepare(
+        `INSERT INTO current_streams (account, token, receivers_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(account, token) DO UPDATE SET
+           receivers_json = excluded.receivers_json,
+           updated_at = excluded.updated_at`,
+      ).run(row.grantor, row.token, row.raw_value, timestamp);
+    }
     return;
   }
 
@@ -547,7 +876,8 @@ export function insertEvent(
   row: InsertEventRow,
   network?: NetworkName,
 ): boolean {
-  const db = getDb(network);
+  const resolvedNetwork = network ?? "testnet";
+  const db = getDb(resolvedNetwork);
 
   try {
     // First try with INSERT OR IGNORE for the primary key constraint
@@ -580,7 +910,7 @@ export function insertEvent(
       );
 
     if (result.changes > 0) {
-      applyEventProjection(db, row);
+          applyEventProjection(db, row, resolvedNetwork);
       return true;
     }
     return false;
@@ -615,7 +945,8 @@ export function insertEventsBatch(
 ): number {
   if (events.length === 0) return 0;
 
-  const db = getDb(network);
+  const resolvedNetwork = network ?? "testnet";
+  const db = getDb(resolvedNetwork);
   let insertedCount = 0;
 
   // Use a transaction for better performance and atomicity
@@ -651,7 +982,7 @@ export function insertEventsBatch(
         );
 
         if (result.changes > 0) {
-          applyEventProjection(db, row);
+      applyEventProjection(db, row, resolvedNetwork);
           insertedCount++;
         }
       } catch (error) {
@@ -2527,7 +2858,8 @@ export function insertSqueezeEvent(
   },
   network?: NetworkName,
 ): { isDuplicate: boolean } {
-  const db = getDb(network);
+  const resolvedNetwork = network ?? "testnet";
+  const db = getDb(resolvedNetwork);
   let isDuplicate = false;
 
   if (params.history_hash) {
@@ -2558,6 +2890,7 @@ export function insertSqueezeEvent(
     params.history_hash ?? null,
     isDuplicate ? 1 : 0,
   );
+  invalidateBalanceCache(params.receiver, params.token, resolvedNetwork);
 
   return { isDuplicate };
 }
@@ -2641,6 +2974,101 @@ export function queryStreamConfig(
     balance: balanceRow?.balance ?? "0",
     max_end_time: streamRow.estimated_end_time ?? null,
   };
+}
+
+interface StreamHistoryCursor {
+  ledger: number;
+  id: string;
+}
+
+function encodeStreamHistoryCursor(cursor: StreamHistoryCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeStreamHistoryCursor(
+  cursor?: string,
+): StreamHistoryCursor | null {
+  if (!cursor) return { ledger: 0, id: "" };
+  try {
+    const value = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as Partial<StreamHistoryCursor>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !Number.isSafeInteger(value.ledger) ||
+      (value.ledger as number) < 0 ||
+      typeof value.id !== "string" ||
+      value.id === ""
+    ) {
+      return null;
+    }
+    return { ledger: value.ledger as number, id: value.id };
+  } catch {
+    return null;
+  }
+}
+
+export function queryStreamHistory(params: {
+  sender: string;
+  receiver: string;
+  token: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<StreamHistoryRow> | "not_found" | null {
+  const db = getDb(params.network);
+  const cursor = decodeStreamHistoryCursor(params.cursor);
+  if (cursor === null) return null;
+
+  const values: unknown[] = [params.sender, params.receiver, params.token];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (ledger > ? OR (ledger = ? AND id > ?))";
+    values.push(cursor.ledger, cursor.ledger, cursor.id);
+  }
+
+  const exists = db
+    .prepare(
+      `SELECT 1 FROM stream_history
+       WHERE sender = ? AND receiver = ? AND token = ? LIMIT 1`,
+    )
+    .get(params.sender, params.receiver, params.token);
+  if (!exists) return "not_found";
+
+  const limit = boundedPageSize(params.limit);
+  const rows = db
+    .prepare(
+      `SELECT id, ledger, timestamp, old_rate, new_rate, action
+       FROM stream_history
+       WHERE sender = ? AND receiver = ? AND token = ? ${after}
+       ORDER BY ledger ASC, id ASC LIMIT ?`,
+    )
+    .all(...values, limit + 1) as Array<
+    StreamHistoryRow & { id: string }
+  >;
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ id: _id, ...row }) => row),
+    nextCursor:
+      hasMore && last
+        ? encodeStreamHistoryCursor({ ledger: last.ledger, id: last.id })
+        : null,
+  };
+}
+
+export function getActiveStreamsCount(network?: NetworkName): number {
+  const now = Math.floor(Date.now() / 1000);
+  const row = getDb(network)
+    .prepare(
+      `SELECT COUNT(*) AS count FROM drips_streams
+       WHERE ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+    )
+    .get(now) as { count: number } | undefined;
+  return row?.count ?? 0;
 }
 
 // ── Top Receivers Leaderboard ──────────────────────────────────────────

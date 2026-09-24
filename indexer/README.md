@@ -91,11 +91,43 @@ Set `INDEXER_URL` in your Next.js deployment environment to point at the
 running query server, or set `INDEXER_TESTNET_URL` and `INDEXER_MAINNET_URL`
 when the networks are served by separate indexer deployments.
 
+### Database pool configuration
+
+The indexer validates these variables at startup and fails with the variable
+name and accepted range when a value is invalid:
+
+| Variable | Default | Accepted values |
+|----------|---------|-----------------|
+| `DB_POOL_MIN` | `0` | Non-negative safe integer, no greater than `DB_POOL_MAX` |
+| `DB_POOL_MAX` | `20` | Positive safe integer |
+| `DB_IDLE_TIMEOUT_MS` | `30000` | Integer from `0` through `2147483647` milliseconds |
+
+PostgreSQL applies the values as `min`, `max`, and `idleTimeoutMillis` on its
+connection pool. SQLite uses one shared WAL connection per network and does
+not create a native connection pool.
+
 ---
 
 ## Query API
 
 Base URL: `http://localhost:3001` (local) or your deployed service URL.
+
+### `GET /metrics`
+
+Prometheus text format is available at the root path, not under `/v1/`.
+Set `METRICS_TOKEN` and send `Authorization: Bearer <token>`.
+
+The response exposes `http_requests_total`, `http_request_duration_seconds`,
+`active_streams_count`, `indexer_lag_ledgers`, and
+`db_pool_connections_active`.
+
+### `GET /streams/history/:sender/:receiver/:token`
+
+Returns chronological stream changes for one sender/receiver/token pair. Each
+history row contains `ledger`, Unix `timestamp`, `old_rate`, `new_rate`, and
+`action` (`open`, `rate_change`, or `close`). Use `limit` (default 50, max 200)
+and the returned `next_cursor` for pagination. The endpoint returns 404 when
+no history exists.
 
 ### `GET /health`
 
