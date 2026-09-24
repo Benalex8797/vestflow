@@ -7,6 +7,10 @@ import type {
   EventQueryParams,
   GiveQueryParams,
   IndexedEvent,
+  StreamConfigDetails,
+  StreamCycleRow,
+  SqueezeEventRow,
+  TopReceiverRow,
   TvlStats,
 } from "./types";
 
@@ -70,7 +74,7 @@ function migrateEventTypeCheck(db: Database.Database): void {
       `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_events'`,
     )
     .get() as { sql: string } | undefined;
-  if (!row?.sql || row.sql.includes("stream_set")) {
+  if (!row?.sql || (row.sql.includes("stream_set") && row.sql.includes("stream_received") && row.sql.includes("squeezed"))) {
     return;
   }
 
@@ -90,6 +94,8 @@ function migrateEventTypeCheck(db: Database.Database): void {
           'stream_set',
           'given',
           'collected',
+          'stream_received',
+          'squeezed',
           'unknown'
         )),
         ledger INTEGER NOT NULL,
@@ -312,6 +318,32 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (account, token)
       );
+      CREATE TABLE IF NOT EXISTS stream_cycles (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        cycle_end_ledger INTEGER NOT NULL,
+        cycle_end_timestamp INTEGER NOT NULL,
+        amount_received TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY (account, token, cycle_end_ledger)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_cycles_account_token
+        ON stream_cycles (account, token, cycle_end_ledger DESC);
+
+      CREATE TABLE IF NOT EXISTS squeeze_events (
+        id TEXT PRIMARY KEY,
+        receiver TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        token TEXT NOT NULL,
+        amount_stroops TEXT NOT NULL,
+        cycle_id INTEGER NOT NULL,
+        ledger INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        history_hash TEXT,
+        is_duplicate INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_squeeze_events_receiver_sender_history
+        ON squeeze_events (receiver, sender, history_hash);
     `);
     migrateEventTypeCheck(db);
     ensureEventDedupIndex(db);
@@ -426,6 +458,77 @@ function applyEventProjection(
          total_collected_stroops = excluded.total_collected_stroops,
          updated_at = excluded.updated_at`,
     ).run(row.beneficiary, row.token, nextTotal, timestamp);
+    return;
+  }
+
+  if (
+    row.event_type === "stream_received" &&
+    row.beneficiary &&
+    row.token &&
+    row.amount
+  ) {
+    db.prepare(
+      `INSERT INTO stream_cycles (account, token, cycle_end_ledger, cycle_end_timestamp, amount_received)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(account, token, cycle_end_ledger) DO UPDATE SET
+         cycle_end_timestamp = excluded.cycle_end_timestamp,
+         amount_received = excluded.amount_received`,
+    ).run(row.beneficiary, row.token, row.ledger, timestamp, row.amount);
+    return;
+  }
+
+  if (
+    row.event_type === "squeezed" &&
+    row.beneficiary &&
+    row.grantor &&
+    row.token &&
+    row.amount
+  ) {
+    let cycleId = 0;
+    let historyHash: string | null = null;
+    try {
+      const val = JSON.parse(row.raw_value);
+      if (Array.isArray(val)) {
+        if (val[1] != null && !isNaN(Number(val[1]))) cycleId = Number(val[1]);
+        if (val[2] != null) historyHash = String(val[2]);
+      } else if (val && typeof val === "object") {
+        if (val.cycle_id != null) cycleId = Number(val.cycle_id);
+        if (val.history_hash != null) historyHash = String(val.history_hash);
+      }
+    } catch {
+      // ignore JSON parse error
+    }
+
+    let isDuplicate = 0;
+    if (historyHash) {
+      const existing = db
+        .prepare(
+          `SELECT id FROM squeeze_events
+           WHERE receiver = ? AND sender = ? AND history_hash = ? AND is_duplicate = 0`,
+        )
+        .get(row.beneficiary, row.grantor, historyHash);
+      if (existing) {
+        isDuplicate = 1;
+      }
+    }
+
+    db.prepare(
+      `INSERT OR IGNORE INTO squeeze_events
+        (id, receiver, sender, token, amount_stroops, cycle_id, ledger, timestamp, history_hash, is_duplicate)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      row.id,
+      row.beneficiary,
+      row.grantor,
+      row.token,
+      row.amount,
+      cycleId,
+      row.ledger,
+      timestamp,
+      historyHash,
+      isDuplicate,
+    );
+    return;
   }
 }
 
@@ -2347,203 +2450,247 @@ export function updateDripsListTargetRate(params: {
   };
 }
 
-// ── #828: GET /gives/:id ────────────────────────────────────────────────────
+// ── Stream Cycles & Analytics ─────────────────────────────────────────
 
-/**
- * A give's `id` is a Stellar event id, "<ledger>-<txIndex>-<eventIndex>" —
- * not a plain integer. `tx_hash` is not currently captured by the indexer
- * (see `InsertGiveRow` — only the event id, not the enclosing transaction
- * hash, is stored), so it's always `null` here rather than fabricated.
- */
-export function getGiveById(
-  id: string,
+export function upsertStreamCycle(
+  params: {
+    account: string;
+    token: string;
+    cycle_end_ledger: number;
+    cycle_end_timestamp: number;
+    amount_received: string;
+  },
   network?: NetworkName,
-): {
-  id: string;
-  sender: string;
-  receiver: string;
-  token: string;
-  amount: string;
-  timestamp: number;
-  ledger: number;
-  tx_hash: null;
-} | null {
-  const row = getDb(network)
+): void {
+  getDb(network)
     .prepare(
-      `SELECT id, sender, receiver, token, amount_stroops AS amount, ledger, timestamp
-       FROM gives WHERE id = ?`,
+      `INSERT INTO stream_cycles (account, token, cycle_end_ledger, cycle_end_timestamp, amount_received)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(account, token, cycle_end_ledger) DO UPDATE SET
+         cycle_end_timestamp = excluded.cycle_end_timestamp,
+         amount_received = excluded.amount_received`,
     )
-    .get(id) as
-    | { id: string; sender: string; receiver: string; token: string; amount: string; ledger: number; timestamp: number }
-    | undefined;
-  if (!row) return null;
-  return { ...row, tx_hash: null };
+    .run(
+      params.account,
+      params.token,
+      params.cycle_end_ledger,
+      params.cycle_end_timestamp,
+      params.amount_received,
+    );
 }
 
-// ── #830: GET /lists/search ─────────────────────────────────────────────────
-
-export function searchDripsLists(params: {
-  q: string;
+export function queryStreamCycles(params: {
+  account?: string;
+  token?: string;
   limit?: number;
-  cursor?: string;
   network?: NetworkName;
-}): CursorPage<DripsList> | null {
-  const q = params.q.trim();
-  if (!q) return { items: [], nextCursor: null };
+}): StreamCycleRow[] {
+  const db = getDb(params.network);
+  const conditions: string[] = [];
+  const values: unknown[] = [];
 
-  // Offset-based cursor: simpler and sufficient at this table's expected
-  // size (a keyset cursor over a computed relevance column needs the
-  // relevance bucket encoded in the cursor and re-derived on every page,
-  // which isn't worth the complexity for a search result set this small).
-  let offset = 0;
-  if (params.cursor) {
-    const decoded = Buffer.from(params.cursor, "base64url").toString("utf8");
-    offset = Number(decoded);
-    if (!Number.isInteger(offset) || offset < 0) return null;
+  if (params.account) {
+    conditions.push("account = ?");
+    values.push(params.account);
+  }
+  if (params.token) {
+    conditions.push("token = ?");
+    values.push(params.token);
   }
 
-  // Relevance: exact match (0) < starts-with (1) < contains (2). SQLite has
-  // no case-insensitive LIKE for non-ASCII, but names here are expected to
-  // be ASCII identifiers; LOWER() covers the common case.
-  const nameLower = "LOWER(l.name)";
-  const qLower = q.toLowerCase();
-  const relevance = `CASE
-    WHEN ${nameLower} = ? THEN 0
-    WHEN ${nameLower} LIKE ? THEN 1
-    ELSE 2
-  END`;
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = Math.min(params.limit ?? 50, 200);
 
-  const limit = Math.min(Math.max(params.limit ?? 50, 1), 50);
-  const rows = getDb(params.network)
+  return db
     .prepare(
-      `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
-       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec,
-       COUNT(m.address) AS member_count
-     FROM drips_lists l
-     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
-     WHERE ${nameLower} LIKE ?
-     GROUP BY l.id
-     ORDER BY ${relevance} ASC, l.name ASC, l.id ASC
-     LIMIT ? OFFSET ?`,
+      `SELECT account, token, cycle_end_ledger, cycle_end_timestamp, amount_received, created_at
+       FROM stream_cycles
+       ${whereClause}
+       ORDER BY cycle_end_ledger DESC LIMIT ?`,
     )
-    .all(qLower, qLower, `${qLower}%`, `%${qLower}%`, limit + 1, offset) as DripsList[];
+    .all(...values, limit) as StreamCycleRow[];
+}
 
-  const hasMore = rows.length > limit;
-  const page = rows.slice(0, limit);
+// ── Squeeze Events ────────────────────────────────────────────────────
+
+export function insertSqueezeEvent(
+  params: {
+    id: string;
+    receiver: string;
+    sender: string;
+    token: string;
+    amount_stroops: string;
+    cycle_id: number;
+    ledger: number;
+    timestamp: number;
+    history_hash?: string | null;
+  },
+  network?: NetworkName,
+): { isDuplicate: boolean } {
+  const db = getDb(network);
+  let isDuplicate = false;
+
+  if (params.history_hash) {
+    const existing = db
+      .prepare(
+        `SELECT id FROM squeeze_events
+         WHERE receiver = ? AND sender = ? AND history_hash = ? AND is_duplicate = 0`,
+      )
+      .get(params.receiver, params.sender, params.history_hash);
+    if (existing) {
+      isDuplicate = true;
+    }
+  }
+
+  db.prepare(
+    `INSERT OR IGNORE INTO squeeze_events
+      (id, receiver, sender, token, amount_stroops, cycle_id, ledger, timestamp, history_hash, is_duplicate)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    params.id,
+    params.receiver,
+    params.sender,
+    params.token,
+    params.amount_stroops,
+    params.cycle_id,
+    params.ledger,
+    params.timestamp,
+    params.history_hash ?? null,
+    isDuplicate ? 1 : 0,
+  );
+
+  return { isDuplicate };
+}
+
+export function querySqueezeEvents(params: {
+  receiver?: string;
+  sender?: string;
+  token?: string;
+  limit?: number;
+  network?: NetworkName;
+}): SqueezeEventRow[] {
+  const db = getDb(params.network);
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (params.receiver) {
+    conditions.push("receiver = ?");
+    values.push(params.receiver);
+  }
+  if (params.sender) {
+    conditions.push("sender = ?");
+    values.push(params.sender);
+  }
+  if (params.token) {
+    conditions.push("token = ?");
+    values.push(params.token);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = Math.min(params.limit ?? 50, 200);
+
+  return db
+    .prepare(
+      `SELECT id, receiver, sender, token, amount_stroops, cycle_id, ledger, timestamp, history_hash, is_duplicate
+       FROM squeeze_events
+       ${whereClause}
+       ORDER BY timestamp DESC, id DESC LIMIT ?`,
+    )
+    .all(...values, limit) as SqueezeEventRow[];
+}
+
+// ── Stream Config Query ───────────────────────────────────────────────
+
+export function queryStreamConfig(
+  sender: string,
+  receiver: string,
+  token: string,
+  network?: NetworkName,
+): StreamConfigDetails | null {
+  const db = getDb(network);
+  const now = Math.floor(Date.now() / 1000);
+
+  const streamRow = db
+    .prepare(
+      `SELECT rate_per_second, estimated_end_time, created_at
+       FROM drips_streams
+       WHERE account = ? AND receiver = ? AND token = ? AND ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(sender, receiver, token, now) as
+    | { rate_per_second: string; estimated_end_time: number | null; created_at: number }
+    | undefined;
+
+  if (!streamRow) {
+    return null;
+  }
+
+  const balanceRow = db
+    .prepare(
+      `SELECT balance FROM drips_streaming_balances WHERE account = ? AND token = ?`,
+    )
+    .get(sender, token) as { balance: string } | undefined;
+
   return {
-    items: page,
-    nextCursor: hasMore ? Buffer.from(String(offset + limit)).toString("base64url") : null,
+    sender,
+    receiver,
+    token,
+    rate: streamRow.rate_per_second,
+    start_time: streamRow.created_at,
+    balance: balanceRow?.balance ?? "0",
+    max_end_time: streamRow.estimated_end_time ?? null,
   };
 }
 
-// ── #831: GET /analytics/streams/flow ───────────────────────────────────────
+// ── Top Receivers Leaderboard ──────────────────────────────────────────
 
-export interface StreamFlowDay {
-  day: string; // YYYY-MM-DD
-  new_streams_rate: string;
-  closed_streams_rate: string;
-}
+export function queryTopReceivers(
+  token: string,
+  limit: number = 10,
+  network?: NetworkName,
+): TopReceiverRow[] {
+  const db = getDb(network);
+  const now = Math.floor(Date.now() / 1000);
 
-/**
- * Daily new-stream (outflow) vs. closed-or-expired-stream (inflow) rate
- * totals for a flow area chart. "Closed" covers both an explicit close
- * (`ended_at` set) and natural expiry (past `estimated_end_time` with no
- * explicit close) — both remove the stream's rate from circulation.
- */
-export function getStreamFlowByDay(params: {
-  token?: string;
-  from?: string;
-  to?: string;
-  network?: NetworkName;
-}): StreamFlowDay[] {
-  const nowSec = Math.floor(Date.now() / 1000);
-  const fromSec = params.from ? Math.floor(new Date(params.from).getTime() / 1000) : nowSec - 30 * 86400;
-  const toSec = params.to ? Math.floor(new Date(params.to).getTime() / 1000) : nowSec;
-
-  const tokenClause = params.token ? "AND token = ?" : "";
-  const tokenValue = params.token ? [params.token] : [];
-
-  const newRows = getDb(params.network)
+  const activeStreams = db
     .prepare(
-      `SELECT strftime('%Y-%m-%d', created_at, 'unixepoch') AS day,
-              SUM(CAST(rate_per_second AS REAL)) AS rate
+      `SELECT account, receiver, rate_per_second
        FROM drips_streams
-       WHERE created_at >= ? AND created_at <= ? ${tokenClause}
-       GROUP BY day`,
+       WHERE token = ? AND ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
     )
-    .all(fromSec, toSec, ...tokenValue) as { day: string; rate: number }[];
+    .all(token, now) as { account: string; receiver: string; rate_per_second: string }[];
 
-  const closedRows = getDb(params.network)
-    .prepare(
-      `SELECT strftime('%Y-%m-%d', closed_at, 'unixepoch') AS day,
-              SUM(CAST(rate_per_second AS REAL)) AS rate
-       FROM (
-         SELECT rate_per_second, token,
-                COALESCE(ended_at, CASE WHEN estimated_end_time <= ? THEN estimated_end_time END) AS closed_at
-         FROM drips_streams
-       )
-       WHERE closed_at IS NOT NULL AND closed_at >= ? AND closed_at <= ? ${tokenClause}
-       GROUP BY day`,
-    )
-    .all(nowSec, fromSec, toSec, ...tokenValue) as { day: string; rate: number }[];
+  const receiversMap = new Map<string, { totalRate: bigint; senders: Set<string> }>();
 
-  const newByDay = new Map(newRows.map((r) => [r.day, r.rate]));
-  const closedByDay = new Map(closedRows.map((r) => [r.day, r.rate]));
+  for (const stream of activeStreams) {
+    let entry = receiversMap.get(stream.receiver);
+    if (!entry) {
+      entry = { totalRate: 0n, senders: new Set() };
+      receiversMap.set(stream.receiver, entry);
+    }
+    entry.totalRate += BigInt(stream.rate_per_second);
+    entry.senders.add(stream.account);
+  }
 
-  // Gap-fill every day in [from, to] with zeros, even if no activity at all.
-  const days: StreamFlowDay[] = [];
-  for (let t = fromSec - (fromSec % 86400); t <= toSec; t += 86400) {
-    const day = new Date(t * 1000).toISOString().slice(0, 10);
-    days.push({
-      day,
-      new_streams_rate: String(newByDay.get(day) ?? 0),
-      closed_streams_rate: String(closedByDay.get(day) ?? 0),
+  const list: TopReceiverRow[] = [];
+  for (const [receiver, entry] of receiversMap.entries()) {
+    list.push({
+      account: receiver,
+      total_incoming_rate_per_sec: entry.totalRate.toString(),
+      sender_count: entry.senders.size,
     });
   }
-  return days;
+
+  list.sort((a, b) => {
+    const diff = BigInt(b.total_incoming_rate_per_sec) - BigInt(a.total_incoming_rate_per_sec);
+    if (diff > 0n) return 1;
+    if (diff < 0n) return -1;
+    return a.account.localeCompare(b.account);
+  });
+
+  const cappedLimit = Math.max(1, Math.min(limit, 50));
+  return list.slice(0, cappedLimit);
 }
 
-// ── #832: GET /analytics/splits/distribution ────────────────────────────────
-
-export type SplitsReceiverBucket = "1" | "2" | "3-5" | "6-10" | "10+";
-
-export interface SplitsDistributionRow {
-  receiver_count_bucket: SplitsReceiverBucket;
-  account_count: number;
-}
-
-const SPLITS_BUCKETS: SplitsReceiverBucket[] = ["1", "2", "3-5", "6-10", "10+"];
-
-function bucketForReceiverCount(count: number): SplitsReceiverBucket | null {
-  if (count <= 0) return null;
-  if (count === 1) return "1";
-  if (count === 2) return "2";
-  if (count <= 5) return "3-5";
-  if (count <= 10) return "6-10";
-  return "10+";
-}
-
-/** Distribution of split-receiver-count across accounts with a configured splits/streams receiver set. */
-export function getSplitsDistribution(network?: NetworkName): SplitsDistributionRow[] {
-  const rows = getDb(network)
-    .prepare(`SELECT receivers_json FROM current_streams`)
-    .all() as { receivers_json: string }[];
-
-  const counts = new Map<SplitsReceiverBucket, number>(SPLITS_BUCKETS.map((b) => [b, 0]));
-  for (const row of rows) {
-    let receiverCount = 0;
-    try {
-      const parsed = JSON.parse(row.receivers_json);
-      if (Array.isArray(parsed)) receiverCount = parsed.length;
-    } catch {
-      continue;
-    }
-    const bucket = bucketForReceiverCount(receiverCount);
-    if (bucket) counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
-  }
-
-  return SPLITS_BUCKETS.map((bucket) => ({
-    receiver_count_bucket: bucket,
-    account_count: counts.get(bucket) ?? 0,
-  }));
-}
