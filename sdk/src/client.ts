@@ -34,6 +34,8 @@ import type {
   SplitsConfig,
   ProfileSummary,
   GiveRecord,
+  GiveHistoryPage,
+  GiveHistoryOptions,
   DripsListSummary,
 } from "./types";
 import { ProfileError } from "./types";
@@ -267,6 +269,50 @@ export class VestflowClient {
       ratePerSec: BigInt(String(item.ratePerSec ?? item.rate_per_sec ?? 0)),
       maxEndTime: Number(item.maxEndTime ?? item.max_end_time ?? 0),
     }));
+  }
+
+  /** Query sent and/or received give history for an account. */
+  async getGiveHistory(
+    account: string,
+    options: GiveHistoryOptions = {}
+  ): Promise<GiveHistoryPage> {
+    const asSender = options.asSender ?? false;
+    const asReceiver = options.asReceiver ?? false;
+    const directions = asSender === asReceiver
+      ? ["sender", "receiver"]
+      : [asSender ? "sender" : "receiver"];
+    const pages = await Promise.all(directions.map(async (direction) => {
+      const params = new URLSearchParams([[direction, account]]);
+      if (options.token) params.set("token", options.token);
+      if (options.limit !== undefined) params.set("limit", String(options.limit));
+      if (options.cursor) params.set("cursor", options.cursor);
+      const url = `${this.indexerUrl.replace(/\/$/, "")}/gives?${params}`;
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!res.ok) throw new Error(`Indexer request failed: ${res.status} ${res.statusText}`);
+      const data = (await res.json()) as {
+        gives?: unknown[];
+        items?: unknown[];
+        nextCursor?: string | null;
+        next_cursor?: string | null;
+      };
+      const raw = Array.isArray(data.gives) ? data.gives : data.items ?? [];
+      return {
+        items: (raw as Record<string, unknown>[]).map((item) => ({
+          id: String(item.id ?? ""),
+          sender: String(item.sender ?? ""),
+          receiver: String(item.receiver ?? ""),
+          token: String(item.token ?? ""),
+          amount: BigInt(String(item.amount ?? item.amount_stroops ?? 0)),
+          ledger: Number(item.ledger ?? 0),
+          timestamp: Number(item.timestamp ?? 0),
+        })),
+        nextCursor: data.nextCursor ?? data.next_cursor ?? undefined,
+      };
+    }));
+    return {
+      items: pages.flatMap((page) => page.items),
+      nextCursor: pages.find((page) => page.nextCursor)?.nextCursor,
+    };
   }
 
   // ── Internal: parse schedule ──────────────────────────────────────────────
@@ -1635,3 +1681,4 @@ export class VestflowClient {
     };
   }
 }
+

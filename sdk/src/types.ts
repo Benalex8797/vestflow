@@ -200,6 +200,21 @@ export interface GiveRecord {
   timestamp: number;
 }
 
+/** A paginated page of give history returned by the indexer. */
+export interface GiveHistoryPage {
+  items: GiveRecord[];
+  nextCursor?: string;
+}
+
+/** Filters accepted by `VestflowClient.getGiveHistory`. */
+export interface GiveHistoryOptions {
+  asSender?: boolean;
+  asReceiver?: boolean;
+  token?: string;
+  limit?: number;
+  cursor?: string;
+}
+
 /**
  * A Drips list owned by an address, as summarised on a profile.
  */
