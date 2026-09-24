@@ -3,6 +3,8 @@ import { randomBytes } from "crypto";
 import { getDb } from "@/indexer/src/db";
 import { isValidStellarAddress } from "@/lib/stellar-verify";
 import { withLogging } from "@/lib/requestLogger";
+import { createErrorResponse } from "@/lib/apiError";
+import { createVersionedHandler } from "@/lib/versionedRoute";
 
 const NONCE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes (must match verify route)
 
@@ -16,11 +18,15 @@ export const POST = withLogging(async function POST(request: NextRequest): Promi
     const { publicKey } = body;
 
     if (!publicKey || typeof publicKey !== "string") {
-      return NextResponse.json({ error: "publicKey is required" }, { status: 400 });
+      return createErrorResponse(400, "publicKey is required", request);
     }
 
     if (!isValidStellarAddress(publicKey)) {
-      return NextResponse.json({ error: "Invalid Stellar address format" }, { status: 400 });
+      return createErrorResponse(
+        400,
+        "Invalid Stellar address format",
+        request
+      );
     }
 
     const nonce = randomBytes(32).toString("hex");
@@ -37,6 +43,8 @@ export const POST = withLogging(async function POST(request: NextRequest): Promi
     return NextResponse.json({ nonce, expiresAt }, { status: 200 });
   } catch (error) {
     console.error("Error issuing nonce:", error);
-    return NextResponse.json({ error: "Failed to issue nonce" }, { status: 500 });
+    return createErrorResponse(500, "Failed to issue nonce", request);
   }
 });
+
+export const POST_VERSIONED = createVersionedHandler(POST);
