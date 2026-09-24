@@ -23,6 +23,9 @@ const cspHeader = [
 const nextConfig: NextConfig = {
   output: process.env.DOCKER_BUILD ? "standalone" : undefined,
   serverExternalPackages: ["better-sqlite3"],
+  experimental: {
+    instrumentationHook: true,
+  },
   turbopack: {
     root: process.cwd(),
   },

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { queryDripsLists, getDb } from "@/indexer/src/db";
 import { parseNetwork } from "@/indexer/src/config";
 import { withLogging } from "@/lib/requestLogger";
+import { createErrorResponse } from "@/lib/apiError";
+import { createVersionedHandler } from "@/lib/versionedRoute";
 
 export const GET = withLogging(async function GET(request: NextRequest): Promise<NextResponse> {
   const { searchParams } = request.nextUrl;
@@ -14,11 +16,21 @@ export const GET = withLogging(async function GET(request: NextRequest): Promise
   try {
     const page = queryDripsLists({ owner, limit, cursor, network });
     if (!page) {
-      return NextResponse.json({ error: "Invalid query parameters" }, { status: 400 });
+      return createErrorResponse(
+        400,
+        "Invalid query parameters",
+        request
+      );
     }
     return NextResponse.json({ lists: page.items, next_cursor: page.nextCursor });
   } catch (error) {
     console.error("Error querying drips lists:", error);
-    return NextResponse.json({ error: "Failed to query lists" }, { status: 500 });
+    return createErrorResponse(
+      500,
+      "Failed to query lists",
+      request
+    );
   }
 });
+
+export const GET_VERSIONED = createVersionedHandler(GET);
