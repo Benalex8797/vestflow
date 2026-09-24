@@ -9,6 +9,8 @@ import {
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
 import { withLogging } from "@/lib/requestLogger";
+import { createErrorResponse } from "@/lib/apiError";
+import { createVersionedHandler } from "@/lib/versionedRoute";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
@@ -72,26 +74,29 @@ export const GET = withLogging(async function GET(request: NextRequest): Promise
     const limitParam = request.nextUrl.searchParams.get("limit");
 
     if (!address) {
-      return NextResponse.json(
-        { error: "Missing required query parameter: address, grantor or beneficiary" },
-        { status: 400 }
+      return createErrorResponse(
+        400,
+        "Missing required query parameter: address, grantor or beneficiary",
+        request
       );
     }
 
     // Both role params at once is only meaningful for the same wallet; two
     // different addresses would silently query just one of them.
     if (grantorParam && beneficiaryParam && grantorParam !== beneficiaryParam) {
-      return NextResponse.json(
-        { error: "grantor and beneficiary must refer to the same address" },
-        { status: 400 }
+      return createErrorResponse(
+        400,
+        "grantor and beneficiary must refer to the same address",
+        request
       );
     }
 
     const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
     if (!STELLAR_ADDRESS_RE.test(address)) {
-      return NextResponse.json(
-        { error: "Invalid Stellar address format" },
-        { status: 400 }
+      return createErrorResponse(
+        400,
+        "Invalid Stellar address format",
+        request
       );
     }
 
@@ -206,10 +211,13 @@ export const GET = withLogging(async function GET(request: NextRequest): Promise
     });
   } catch (error) {
     console.error("Error fetching schedules by address:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch schedules" },
-      { status: 500 }
+    return createErrorResponse(
+      500,
+      "Failed to fetch schedules",
+      request
     );
   }
 });
+
+export const GET_VERSIONED = createVersionedHandler(GET);
 
