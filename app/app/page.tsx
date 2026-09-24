@@ -35,6 +35,7 @@ import Link from "next/link";
 
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
 import WalletQrModal from "@/components/WalletQrModal";
+import GiveModal from "@/components/GiveModal";
 import OnboardingTour from "@/components/OnboardingTour";
 import CycleCountdown from "@/components/CycleCountdown";
 import IncomingStreamsList from "@/components/IncomingStreamsList";
@@ -268,22 +269,66 @@ function OutgoingStreamsList({
   onEdit: (s: ScheduleData) => void;
   onStop: (s: ScheduleData) => void;
 }) {
+  const [outgoingTokenFilter, setOutgoingTokenFilter] = useState<string>("all");
+  const [outgoingPage, setOutgoingPage] = useState(1);
+  const PAGE_SIZE = 20;
+
   const outgoing = schedules.filter(
     (s) => s.grantor === publicKey && !s.revoked,
   );
 
+  const uniqueOutgoingTokens = Array.from(new Set(outgoing.map(s => s.token))).sort();
+
+  const filteredOutgoing = outgoing.filter(s =>
+    outgoingTokenFilter === "all" || s.token === outgoingTokenFilter
+  );
+
   if (outgoing.length === 0) return null;
+
+  const totalPages = Math.ceil(filteredOutgoing.length / PAGE_SIZE);
+  const startIdx = (outgoingPage - 1) * PAGE_SIZE;
+  const endIdx = startIdx + PAGE_SIZE;
+  const paginatedOutgoing = filteredOutgoing.slice(startIdx, endIdx);
+  const canGoNext = outgoingPage < totalPages;
+  const canGoPrev = outgoingPage > 1;
+
+  const handleOutgoingFilterChange = (token: string) => {
+    setOutgoingTokenFilter(token);
+    setOutgoingPage(1);
+  };
 
   const now = Math.floor(Date.now() / 1000);
 
   return (
     <div className="card p-5 mb-6">
-      <div className="mb-4">
-        <h2 className="text-lg font-semibold">Outgoing Streams</h2>
-        <p className="text-sm text-zinc-500">All active vesting schedules sent from your wallet</p>
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Outgoing Streams</h2>
+          <p className="text-sm text-zinc-500">All active vesting schedules sent from your wallet</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label htmlFor="outgoing-token-filter" className="text-xs text-zinc-500">Filter by token:</label>
+          <select
+            id="outgoing-token-filter"
+            value={outgoingTokenFilter}
+            onChange={(e) => handleOutgoingFilterChange(e.target.value)}
+            className="text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+          >
+            <option value="all">All tokens</option>
+            {uniqueOutgoingTokens.map(token => {
+              const isNative = token === NATIVE_TOKEN;
+              const label = isNative ? "XLM (Native)" : `${token.slice(0, 8)}...${token.slice(-4)}`;
+              return (
+                <option key={token} value={token}>
+                  {label}
+                </option>
+              );
+            })}
+          </select>
+        </div>
       </div>
       <div className="divide-y divide-white/10">
-        {outgoing.map((s) => {
+        {paginatedOutgoing.map((s) => {
           const ratePerSec = s.duration > 0 ? s.total_amount / BigInt(s.duration) : 0n;
           const ratePerDay = ratePerSec * 86400n;
           const endTime = s.start_time + s.duration;
@@ -359,6 +404,29 @@ function OutgoingStreamsList({
           );
         })}
       </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-4 mt-4 pt-4 border-t border-white/10">
+          <button
+            onClick={() => setOutgoingPage(Math.max(1, outgoingPage - 1))}
+            disabled={!canGoPrev}
+            className="px-4 py-2 text-sm font-medium border border-white/10 rounded-lg text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Previous page"
+          >
+            ← Previous
+          </button>
+          <span className="text-sm text-zinc-400">
+            Page {outgoingPage} of {totalPages}
+          </span>
+          <button
+            onClick={() => setOutgoingPage(Math.min(totalPages, outgoingPage + 1))}
+            disabled={!canGoNext}
+            className="px-4 py-2 text-sm font-medium border border-white/10 rounded-lg text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Next page"
+          >
+            Next →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -473,6 +541,7 @@ export default function DashboardPage() {
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
   const [showQrModal, setShowQrModal] = useState(false);
+  const [showGiveModal, setShowGiveModal] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [stopConfirmSchedule, setStopConfirmSchedule] = useState<ScheduleData | null>(null);
   const [stoppingId, setStoppingId] = useState<number | null>(null);
@@ -547,6 +616,22 @@ export default function DashboardPage() {
   };
 
   useEffect(() => { load(); }, [publicKey]);
+
+  // Keyboard shortcut Shift+G to open Give modal (#816)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.shiftKey && e.key === 'G') {
+        const target = e.target as HTMLElement;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+          return;
+        }
+        e.preventDefault();
+        setShowGiveModal(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Stream notifications for incoming streams
   useStreamNotifications(publicKey ? schedules : null, publicKey);
@@ -972,6 +1057,13 @@ export default function DashboardPage() {
           onClose={() => setShowQrModal(false)}
         />
       )}
+
+      {/* Give Modal (#816) */}
+      <GiveModal
+        open={showGiveModal}
+        onClose={() => setShowGiveModal(false)}
+        onSuccess={() => setRefreshKey(k => k + 1)}
+      />
 
       {/* Onboarding Tour */}
       <OnboardingTour />

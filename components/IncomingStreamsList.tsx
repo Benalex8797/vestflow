@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { NATIVE_TOKEN, NETWORK, stroopsToXlm } from "@/lib/stellar";
 
 interface IncomingStream {
@@ -9,6 +10,8 @@ interface IncomingStream {
   ratePerSec: bigint;
   maxEndTime: number;
 }
+
+const PAGE_SIZE = 20;
 
 function tokenLabel(token: string): string {
   if (token === NATIVE_TOKEN) return "XLM";
@@ -26,6 +29,9 @@ interface IncomingStreamsListProps {
 }
 
 export default function IncomingStreamsList({ publicKey, refreshKey }: IncomingStreamsListProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const currentPage = parseInt(searchParams.get('incomingPage') || '1', 10);
   const [streams, setStreams] = useState<IncomingStream[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -68,6 +74,25 @@ export default function IncomingStreamsList({ publicKey, refreshKey }: IncomingS
 
   if (streams.length === 0) return null;
 
+  const totalPages = Math.ceil(streams.length / PAGE_SIZE);
+  const startIdx = (currentPage - 1) * PAGE_SIZE;
+  const endIdx = startIdx + PAGE_SIZE;
+  const paginatedStreams = streams.slice(startIdx, endIdx);
+  const canGoNext = currentPage < totalPages;
+  const canGoPrev = currentPage > 1;
+
+  const handlePrevPage = () => {
+    const params = new URLSearchParams(searchParams);
+    params.set('incomingPage', String(currentPage - 1));
+    router.push(`?${params.toString()}`);
+  };
+
+  const handleNextPage = () => {
+    const params = new URLSearchParams(searchParams);
+    params.set('incomingPage', String(currentPage + 1));
+    router.push(`?${params.toString()}`);
+  };
+
   return (
     <div className="card p-5 mb-6">
       <div className="flex items-center justify-between gap-3 mb-4">
@@ -85,7 +110,7 @@ export default function IncomingStreamsList({ publicKey, refreshKey }: IncomingS
         </button>
       </div>
       <div className="divide-y divide-white/10">
-        {streams.map((stream, i) => {
+        {paginatedStreams.map((stream, i) => {
           const ratePerDay = stream.ratePerSec * 86400n;
           const hasEnd = stream.maxEndTime > 0;
           const isExpired = hasEnd && stream.maxEndTime <= Math.floor(Date.now() / 1000);
@@ -125,6 +150,29 @@ export default function IncomingStreamsList({ publicKey, refreshKey }: IncomingS
           );
         })}
       </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-4 mt-4 pt-4 border-t border-white/10">
+          <button
+            onClick={handlePrevPage}
+            disabled={!canGoPrev}
+            className="px-4 py-2 text-sm font-medium border border-white/10 rounded-lg text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Previous page"
+          >
+            ← Previous
+          </button>
+          <span className="text-sm text-zinc-400">
+            Page {currentPage} of {totalPages}
+          </span>
+          <button
+            onClick={handleNextPage}
+            disabled={!canGoNext}
+            className="px-4 py-2 text-sm font-medium border border-white/10 rounded-lg text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Next page"
+          >
+            Next →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
