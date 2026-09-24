@@ -411,6 +411,21 @@ export class ReplayEngine {
     if (tag === "prop_ack") return "proposal_acknowledged";
     if (tag === "prop_act") return "proposal_activated";
     if (tag === "prop_exp") return "proposal_expired";
+    if (
+      tag === "stream_set" ||
+      tag === "strm_set" ||
+      tag === "stream_opened" ||
+      tag === "stream_rate_changed" ||
+      tag === "stream_closed"
+    ) {
+      return "stream_set";
+    }
+    if (tag === "given") return "given";
+    if (tag === "collected" || tag === "strm_col") return "collected";
+    if (tag === "strm_recv" || tag === "stream_received") return "stream_received";
+    if (tag === "squeezed" || tag === "squeeze" || tag === "strm_squeeze") {
+      return "squeezed";
+    }
     return "unknown";
   }
 
@@ -497,6 +512,32 @@ export class ReplayEngine {
         grantor = this.toStr(Array.isArray(value) || (value && typeof value === "object")
           ? valueArr[0]
           : value);
+        break;
+      case "stream_set":
+        grantor = this.toStr(topics[1]);
+        token = this.toStr(topics.length >= 4 ? topics[3] : topics[2]);
+        break;
+      case "given":
+        grantor = this.toStr(topics[1]);
+        beneficiary = this.toStr(topics[2]);
+        token = this.toStr(topics[3]);
+        amount = this.toStr(Array.isArray(value) || (value && typeof value === "object") ? valueArr[0] : value);
+        break;
+      case "collected":
+        beneficiary = this.toStr(topics[1]);
+        token = this.toStr(topics[2]);
+        amount = this.toStr(Array.isArray(value) || (value && typeof value === "object") ? valueArr[0] : value);
+        break;
+      case "stream_received":
+        beneficiary = this.toStr(topics[1]);
+        token = this.toStr(topics[2]);
+        amount = this.toStr(valueArr[1] ?? valueArr[0]);
+        break;
+      case "squeezed":
+        beneficiary = this.toStr(topics[1]);
+        grantor = this.toStr(topics[2]);
+        token = this.toStr(topics[3]);
+        amount = this.toStr(valueArr[0] ?? value);
         break;
     }
 

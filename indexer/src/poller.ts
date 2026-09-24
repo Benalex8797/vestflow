@@ -25,7 +25,7 @@ import {
 } from "./db";
 import { materialize } from "./analytics";
 import { invalidateToday } from "./analytics-cache";
-import { getNetworkConfig, parseNetwork } from "./config";
+import { getDatabasePoolConfig, getNetworkConfig, parseNetwork } from "./config";
 import { WebhookDeliveryWorker, fanOutEvent } from "./webhook-delivery";
 import { recordAppNotification } from "./app-notifications";
 import {
@@ -37,6 +37,7 @@ import type { EventType } from "./types";
 
 const NETWORK = parseNetwork(process.env.INDEXER_NETWORK);
 const CONFIG = getNetworkConfig(NETWORK);
+getDatabasePoolConfig();
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "10000");
 const TVL_COMPUTE_INTERVAL_MS = Number(
   process.env.TVL_COMPUTE_INTERVAL_MS ?? "60000",
@@ -90,11 +91,26 @@ function inferEventType(topics: unknown[]): EventType {
   if (tag === "prop_ack") return "proposal_acknowledged";
   if (tag === "prop_act") return "proposal_activated";
   if (tag === "prop_exp") return "proposal_expired";
-  if (tag === "stream_set") return "stream_set";
+  if (
+    tag === "stream_set" ||
+    tag === "strm_set" ||
+    tag === "stream_opened" ||
+    tag === "stream_rate_changed" ||
+    tag === "stream_closed"
+  ) {
+    return "stream_set";
+  }
   if (tag === "given") return "given";
   if (tag === "collected") return "collected";
   if (tag === "strm_recv" || tag === "stream_received") return "stream_received";
-  if (tag === "squeezed" || tag === "squeeze") return "squeezed";
+  if (tag === "strm_col") return "collected";
+  if (
+    tag === "squeezed" ||
+    tag === "squeeze" ||
+    tag === "strm_squeeze"
+  ) {
+    return "squeezed";
+  }
   return "unknown";
 }
 
@@ -345,11 +361,8 @@ async function poll(): Promise<void> {
             );
             break;
           case "stream_set":
-            // topics: ["stream_set", account, token]
-            // value: current receiver configuration. A zero-rate receiver
-            // set is still current state and overwrites older configs.
             grantor = toStr(topics[1]);
-            token = toStr(topics[2]);
+            token = toStr(topics.length >= 4 ? topics[3] : topics[2]);
             break;
           case "given":
             // topics: ["given", sender, receiver, token]

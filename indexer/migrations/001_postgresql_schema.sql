@@ -174,6 +174,22 @@ CREATE TABLE IF NOT EXISTS current_streams (
   PRIMARY KEY (account, token)
 );
 
+CREATE TABLE IF NOT EXISTS stream_history (
+  id        VARCHAR(160) PRIMARY KEY,
+  event_id  VARCHAR(100) NOT NULL,
+  sender    VARCHAR(56) NOT NULL,
+  receiver  VARCHAR(56) NOT NULL,
+  token     VARCHAR(56) NOT NULL,
+  ledger    BIGINT NOT NULL,
+  timestamp TIMESTAMPTZ NOT NULL,
+  old_rate  NUMERIC(38, 0) NOT NULL,
+  new_rate  NUMERIC(38, 0) NOT NULL,
+  action    VARCHAR(20) NOT NULL CHECK (action IN ('open', 'rate_change', 'close'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_stream_history_lookup
+  ON stream_history (sender, receiver, token, ledger, id);
+
 CREATE TABLE IF NOT EXISTS gives (
   id             VARCHAR(100) PRIMARY KEY,
   sender         VARCHAR(56) NOT NULL,

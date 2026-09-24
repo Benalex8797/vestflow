@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { _setTestDb, _clearTestDb, insertSqueezeEvent, querySqueezeEvents, insertEvent } from "../src/db";
+import {
+  clearBalanceCache,
+  getOrSetBalanceCache,
+} from "../src/balance-cache";
 
 const SENDER = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 const RECEIVER = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBYM";
@@ -50,10 +54,12 @@ describe("squeeze_events & double-squeeze duplicate detection", () => {
         ON squeeze_events (receiver, sender, history_hash);
     `);
     _setTestDb("testnet", db);
+    clearBalanceCache();
   });
 
   afterEach(() => {
     _clearTestDb("testnet");
+    clearBalanceCache();
     db.close();
   });
 
@@ -148,5 +154,55 @@ describe("squeeze_events & double-squeeze duplicate detection", () => {
     expect(rows[0].cycle_id).toBe(2);
     expect(rows[0].history_hash).toBe(HASH_1);
     expect(rows[0].is_duplicate).toBe(0);
+  });
+
+  it("invalidates only the matching balance cache entry", async () => {
+    let receiverCalls = 0;
+    let otherCalls = 0;
+    const fetchReceiver = async () => {
+      receiverCalls += 1;
+      return {
+        streamingBalance: String(receiverCalls),
+        collectableAmount: "0",
+        streamingRatePerSec: "1",
+      };
+    };
+    const fetchOther = async () => {
+      otherCalls += 1;
+      return {
+        streamingBalance: String(otherCalls),
+        collectableAmount: "0",
+        streamingRatePerSec: "1",
+      };
+    };
+
+    await getOrSetBalanceCache(RECEIVER, TOKEN, "testnet", fetchReceiver);
+    await getOrSetBalanceCache(RECEIVER, TOKEN, "testnet", fetchReceiver);
+    await getOrSetBalanceCache(SENDER, TOKEN, "testnet", fetchOther);
+    expect(receiverCalls).toBe(1);
+    expect(otherCalls).toBe(1);
+
+    insertEvent({
+      id: "ledger105-tx2-event2",
+      event_type: "squeezed",
+      ledger: 105,
+      ledger_closed_at: "2026-09-24T12:00:01Z",
+      schedule_id: null,
+      proposal_id: null,
+      grantor: SENDER,
+      beneficiary: RECEIVER,
+      amount: "123456",
+      token: TOKEN,
+      created_amount: null,
+      raw_topics: JSON.stringify(["squeezed", RECEIVER, SENDER, TOKEN]),
+      raw_value: JSON.stringify(["123456", 3, "hash-2"]),
+    }, "testnet");
+
+    const refreshed = await getOrSetBalanceCache(RECEIVER, TOKEN, "testnet", fetchReceiver);
+    const untouched = await getOrSetBalanceCache(SENDER, TOKEN, "testnet", fetchOther);
+    expect(refreshed.streamingBalance).toBe("2");
+    expect(untouched.streamingBalance).toBe("1");
+    expect(receiverCalls).toBe(2);
+    expect(otherCalls).toBe(1);
   });
 });

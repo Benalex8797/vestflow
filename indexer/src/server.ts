@@ -30,6 +30,7 @@ import {
   queryGivesForAccount,
   queryHistory,
   queryStreamConfig,
+  queryStreamHistory,
   queryStreamCycles,
   queryTopReceivers,
 } from "./db";
@@ -43,13 +44,22 @@ import {
   getGrantorSummary,
 } from "./analytics";
 import { cacheKey, cacheGet, cacheSet } from "./analytics-cache";
+import { getDatabasePoolConfig } from "./config";
 import {
   getCachedTokenDecimals,
   getTokenDecimals,
   stroopsToDisplay,
 } from "./token-metadata";
+import {
+  isMetricsAuthorized,
+  metricsRoute,
+  recordHttpRequest,
+  renderPrometheusMetrics,
+} from "./metrics";
 
 const PORT = Number(process.env.INDEXER_PORT ?? "3001");
+
+getDatabasePoolConfig();
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
@@ -246,6 +256,39 @@ function buildEventQueryParams(
     limit: numParam(searchParams, "limit"),
     offset: numParam(searchParams, "offset"),
   };
+}
+
+async function handleMetrics(
+  res: http.ServerResponse,
+  authorization: string | undefined,
+): Promise<void> {
+  if (!isMetricsAuthorized(authorization)) {
+    res.writeHead(401, {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": "Bearer",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+    return;
+  }
+
+  try {
+    const body = await renderPrometheusMetrics(
+      (process.env.INDEXER_NETWORK === "mainnet" ? "mainnet" : "testnet"),
+    );
+    res.writeHead(200, {
+      "Content-Type": "text/plain; version=0.0.4",
+      "Cache-Control": "no-store",
+    });
+    res.end(body);
+  } catch (error) {
+    console.error("[server] Metrics collection failed:", error);
+    res.writeHead(500, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify({ error: "Metrics collection failed" }));
+  }
 }
 
 function handleHealth(res: http.ServerResponse): void {
@@ -574,6 +617,49 @@ function handleStreamConfig(
   return json(res, 200, config);
 }
 
+function handleStreamHistory(
+  res: http.ServerResponse,
+  sender: string,
+  receiver: string,
+  token: string,
+  searchParams: URLSearchParams,
+): void {
+  if (!STELLAR_ADDRESS.test(sender) || !STELLAR_ADDRESS.test(receiver)) {
+    return json(res, 400, { error: "Invalid Stellar address" });
+  }
+  if (!token) {
+    return json(res, 400, { error: "token is required" });
+  }
+
+  const limit = limitParam(searchParams);
+  if (limit === null || (limit !== undefined && limit > 200)) {
+    return json(res, 400, { error: "limit must be a positive integer no greater than 200" });
+  }
+  const network = networkParam(searchParams);
+  if (!network) {
+    return json(res, 400, { error: "network must be mainnet or testnet" });
+  }
+
+  const page = queryStreamHistory({
+    sender,
+    receiver,
+    token,
+    limit,
+    cursor: searchParams.get("cursor") ?? undefined,
+    network,
+  });
+  if (page === "not_found") {
+    return json(res, 404, { error: "Stream history not found" });
+  }
+  if (page === null) {
+    return json(res, 400, { error: "cursor is invalid" });
+  }
+  return json(res, 200, {
+    history: page.items,
+    next_cursor: page.nextCursor,
+  });
+}
+
 function handleAnalyticsCycles(
   res: http.ServerResponse,
   searchParams: URLSearchParams,
@@ -626,6 +712,7 @@ function handleAnalyticsTopReceivers(
 }
 
 export function createServer(): http.Server {
+  getDatabasePoolConfig();
   return http.createServer(async (req, res) => {
     let url: URL;
 
@@ -636,6 +723,18 @@ export function createServer(): http.Server {
         error: "Invalid URL",
       });
     }
+
+    const startedAt = process.hrtime.bigint();
+    const requestPath = metricsRoute(url.pathname);
+    res.once("finish", () => {
+      const durationSeconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
+      recordHttpRequest(
+        req.method ?? "GET",
+        requestPath,
+        res.statusCode,
+        durationSeconds,
+      );
+    });
 
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
@@ -688,11 +787,17 @@ export function createServer(): http.Server {
     );
     const listMembersMatch = url.pathname.match(/^\/lists\/([^/]+)\/members$/);
     const profileMatch = url.pathname.match(/^\/profile\/(G[A-Z2-7]{55})$/);
+    const streamHistoryMatch = url.pathname.match(
+      /^\/streams\/history\/([^/]+)\/([^/]+)\/([^/]+)$/,
+    );
     const streamConfigMatch = url.pathname.match(
       /^\/streams\/([^/]+)\/([^/]+)\/([^/]+)$/,
     );
 
     switch (url.pathname) {
+      case "/metrics":
+        return handleMetrics(res, req.headers.authorization);
+
       case "/health":
         return handleHealth(res);
 
@@ -726,6 +831,15 @@ export function createServer(): http.Server {
         return handleSplits(res, url.searchParams, req.headers["if-none-match"]);
 
       default:
+        if (streamHistoryMatch) {
+          return handleStreamHistory(
+            res,
+            decodeURIComponent(streamHistoryMatch[1]),
+            decodeURIComponent(streamHistoryMatch[2]),
+            decodeURIComponent(streamHistoryMatch[3]),
+            url.searchParams,
+          );
+        }
         if (streamConfigMatch) {
           return handleStreamConfig(
             res,

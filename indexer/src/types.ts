@@ -47,6 +47,14 @@ export interface StreamConfigDetails {
   max_end_time: number | null;
 }
 
+export interface StreamHistoryRow {
+  ledger: number;
+  timestamp: number;
+  old_rate: string;
+  new_rate: string;
+  action: "open" | "rate_change" | "close";
+}
+
 export interface TopReceiverRow {
   account: string;
   total_incoming_rate_per_sec: string;

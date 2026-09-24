@@ -20,11 +20,14 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^15.1.0",
-    "better-sqlite3": "^12.11.1"
+    "better-sqlite3": "^12.11.1",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "autocannon": "^8.0.0",
     "concurrently": "^9.0.0",
     "ts-node": "^10.9.2",
