@@ -8,6 +8,7 @@ import {
   loadGiveDraft,
   saveGiveDraft,
   clearGiveDraft,
+  isDraftEmpty,
 } from "@/lib/giveDraft";
 
 interface GiveModalProps {
@@ -43,7 +44,13 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
       setPendingDraft(loadGiveDraft());
       return;
     }
-    if (wasOpenRef.current && !submittedRef.current) {
+    // Only overwrite storage when there's something to save, so opening and
+    // closing without touching the form keeps an unanswered draft around.
+    if (
+      wasOpenRef.current &&
+      !submittedRef.current &&
+      !isDraftEmpty({ receiver: fieldsRef.current.recipient, amount: fieldsRef.current.amount })
+    ) {
       saveGiveDraft({
         receiver: fieldsRef.current.recipient,
         token,
