@@ -50,6 +50,7 @@ type StatusFilter = "all" | "active" | "completed" | "revoked";
 type KindFilter = "all" | "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
 const PAGE_SIZE = 10;
+const STREAM_BALANCE_POLL_MS = 30_000;
 
 interface DashboardStats {
   totalGranted: bigint;
@@ -549,6 +550,8 @@ export default function DashboardPage() {
   const { recentlyViewed } = useRecentlyViewed();
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [claimableMap, setClaimableMap] = useState<Map<number, bigint>>(new Map());
+  const [vestedMap, setVestedMap] = useState<Map<number, bigint>>(new Map());
+  const [topUpTarget, setTopUpTarget] = useState<ScheduleData | null>(null);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [rpcError, setRpcError] = useState(false);
@@ -595,6 +598,7 @@ export default function DashboardPage() {
           vestedMap.set(id, vestedAmounts[i] ?? 0n);
         });
         setClaimableMap(newClaimableMap);
+        setVestedMap(vestedMap);
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
@@ -637,6 +641,36 @@ export default function DashboardPage() {
   };
 
   useEffect(() => { load(); }, [publicKey]);
+
+  // Poll vested amounts of active outgoing streams so a stream whose balance
+  // hits zero is flagged within one polling cycle (#810).
+  useEffect(() => {
+    if (!publicKey) return;
+    const outgoingIds = schedules
+      .filter((s) => s.grantor === publicKey && !s.revoked)
+      .map((s) => s.id);
+    if (outgoingIds.length === 0) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const amounts = await getVestedAmountBulk(outgoingIds, publicKey);
+        if (cancelled) return;
+        setVestedMap((prev) => {
+          const next = new Map(prev);
+          outgoingIds.forEach((id, i) => next.set(id, amounts[i] ?? 0n));
+          return next;
+        });
+      } catch {
+        // keep last known values; next cycle will retry
+      }
+    };
+    const id = setInterval(poll, STREAM_BALANCE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [publicKey, schedules]);
 
   // Keyboard shortcut Shift+G to open Give modal (#816)
   useEffect(() => {
@@ -842,8 +876,10 @@ export default function DashboardPage() {
             schedules={schedules}
             publicKey={publicKey}
             claimableMap={claimableMap}
+            vestedMap={vestedMap}
             onEdit={(s) => { window.location.href = `/schedule/${s.id}`; }}
             onStop={(s) => setStopConfirmSchedule(s)}
+            onTopUp={(s) => setTopUpTarget(s)}
           />
         )}
         {publicKey && <RecentGives publicKey={publicKey} refreshKey={refreshKey} />}
@@ -1087,6 +1123,19 @@ export default function DashboardPage() {
         onClose={() => setShowGiveModal(false)}
         onSuccess={() => setRefreshKey(k => k + 1)}
       />
+
+      {/* Top Up Modal for outgoing stream warnings (#809, #810) */}
+      {topUpTarget && (
+        <TopUpModal
+          scheduleId={topUpTarget.id}
+          open={!!topUpTarget}
+          onClose={() => setTopUpTarget(null)}
+          onSuccess={() => {
+            // Reload schedules so the extended end time / new balance clears the warning
+            load();
+          }}
+        />
+      )}
 
       {/* Onboarding Tour */}
       <OnboardingTour />
