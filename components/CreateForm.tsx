@@ -181,22 +181,44 @@ function SummaryItem({
 function StreamRateCalculator({
   amountXlm,
   durationDays,
+  onApplyDailyRate,
 }: {
   amountXlm: string;
   durationDays: string;
+  onApplyDailyRate: (dailyRate: number) => void;
 }) {
   const xlmPrice = useXlmPrice();
 
   const amt = parseFloat(amountXlm);
   const dur = parseInt(durationDays);
+  const hasValidDuration = !isNaN(dur) && dur >= 1;
+  const presets = [0.01, 0.1, 1];
+  const presetButtons = (
+    <div className="flex flex-wrap gap-2" aria-label="Daily rate presets">
+      {presets.map((dailyRate) => (
+        <button
+          key={dailyRate}
+          type="button"
+          disabled={!hasValidDuration}
+          onClick={() => onApplyDailyRate(dailyRate)}
+          className="rounded-lg border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-xs font-medium text-violet-200 transition-colors hover:bg-violet-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {dailyRate} XLM/day
+        </button>
+      ))}
+    </div>
+  );
 
-  if (!amountXlm || !durationDays || isNaN(amt) || isNaN(dur) || amt <= 0 || dur < 1) {
+  if (!amountXlm || !hasValidDuration || isNaN(amt) || amt <= 0) {
     return (
       <div className="rounded-xl border border-white/8 bg-white/[0.02] p-4">
         <p className="text-xs uppercase tracking-wider text-zinc-500 mb-3 font-semibold">
           Stream Rate Breakdown
         </p>
-        <p className="text-sm text-zinc-600">Enter an amount and duration to see the cost breakdown.</p>
+        <p className="mb-3 text-sm text-zinc-600">
+          Set a duration, then choose a daily rate or enter a total amount to see the breakdown.
+        </p>
+        {presetButtons}
       </div>
     );
   }
@@ -215,9 +237,12 @@ function StreamRateCalculator({
 
   return (
     <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
-      <p className="text-xs uppercase tracking-wider text-violet-400 mb-3 font-semibold">
-        Stream Rate Breakdown
-      </p>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs uppercase tracking-wider text-violet-400 font-semibold">
+          Stream Rate Breakdown
+        </p>
+        {presetButtons}
+      </div>
       <div className="grid grid-cols-3 gap-3 text-sm">
         {[
           { label: "Per Day", value: perDay },
@@ -326,6 +351,16 @@ export default function CreateForm() {
 
   const set = (k: keyof FormState, v: string | boolean) =>
     setForm((f) => ({ ...f, [k]: v }) as FormState);
+
+  const applyDailyRate = (dailyRate: number) => {
+    const days = parseInt(form.durationDays);
+    if (isNaN(days) || days < 1) return;
+
+    const amount = (dailyRate * days).toFixed(7).replace(/\.?0+$/, "");
+    set("amount", amount);
+    setBalanceError("");
+    touch("amount");
+  };
 
   const touch = (k: keyof FormState) =>
     setTouched(
@@ -775,7 +810,7 @@ export default function CreateForm() {
         />
       </Field>
 
-      <StreamRateCalculator amountXlm={form.amount} durationDays={form.durationDays} />
+      <StreamRateCalculator amountXlm={form.amount} durationDays={form.durationDays} onApplyDailyRate={applyDailyRate} />
 
       <fieldset className="flex flex-col gap-3 border-0 p-0 m-0">
         <legend className="text-sm text-zinc-400">Vesting Type</legend>
