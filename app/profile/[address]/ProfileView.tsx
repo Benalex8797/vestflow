@@ -9,6 +9,7 @@ import AddressLabel from "@/components/AddressLabel";
 import SearchFilterBar from "@/components/SearchFilterBar";
 import EmptyState, { NoSearchResultsEmptyState } from "@/components/EmptyState";
 import { ScheduleListSkeleton } from "@/components/ScheduleCardSkeleton";
+import DependencyTree from "@/components/DependencyTree";
 import {
   getGrantorScheduleIds,
   getBeneficiaryScheduleIds,
@@ -180,6 +181,27 @@ export default function ProfileView({ address }: ProfileViewProps) {
             {/* Copy Profile Link Sharing Button (Issue #648) */}
             <div className="flex items-center gap-3">
               <CopyLinkButton label="Copy Profile Link" />
+              {stats.activeCount > 0 && (
+                <button
+                  onClick={() => {
+                    const profileUrl = typeof window !== "undefined" ? window.location.href : "";
+                    const rate = stats.totalGranted > 0n
+                      ? stroopsToXlm((stats.totalGranted / BigInt(Math.max(1, stats.activeCount))))
+                      : "0";
+                    const text = `I'm streaming tokens on Drips! 🌊 ${rate} per day to my network. Check out my profile: ${profileUrl}`;
+                    const twitterUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`;
+                    window.open(twitterUrl, "_blank", "width=550,height=420");
+                  }}
+                  className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-2 transition-colors flex items-center gap-1.5"
+                  aria-label="Share to Twitter"
+                  title="Share profile on Twitter"
+                >
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M23 3a10.9 10.9 0 01-3.14 1.53 4.48 4.48 0 00-7.86 3v1A10.66 10.66 0 013 4s-4 9 5 13a11.64 11.64 0 01-7 2s9 5 20 5a9.5 9.5 0 00-9-5.5c4.75-2.35 7-7 7-11.5a4.5 4.5 0 00-.08-.83A7.72 7.72 0 0323 3z" />
+                  </svg>
+                  Share on X
+                </button>
+              )}
             </div>
           </div>
 
@@ -270,6 +292,7 @@ export default function ProfileView({ address }: ProfileViewProps) {
 
         {!activityLoading && hasActivity && (
           <div className="mt-10 space-y-6">
+            <DependencyTree address={address} schedules={schedules} />
             <section className="card p-6">
               <h2 className="text-lg font-semibold text-white mb-4">Splits configuration</h2>
               {splits.receivers.length === 0 ? (

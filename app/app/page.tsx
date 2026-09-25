@@ -43,6 +43,8 @@ import StreamListSkeleton from "@/components/StreamListSkeleton";
 import TopUpModal from "@/components/TopUpModal";
 import StreamExpiryBanner from "@/components/StreamExpiryBanner";
 import StreamBalanceBadge from "@/components/StreamBalanceBadge";
+import ActivityFeed from "@/components/ActivityFeed";
+import AnimatedClaimableCard from "@/components/AnimatedClaimableCard";
 import { balanceStatus, isExpiringSoon, maxEndTime } from "@/lib/streamHealth";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
@@ -120,7 +122,7 @@ function AnimatedStatCard({
   );
 }
 
-function AnimatedStats({ stats }: { stats: DashboardStats }) {
+function AnimatedStats({ stats, schedules, publicKey }: { stats: DashboardStats; schedules: ScheduleData[]; publicKey: string }) {
   const [fired, setFired] = useState(false);
   useEffect(() => {
     // Trigger animation on the frame after mount so we get the count-up from 0
@@ -129,6 +131,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   }, []);
 
   const toXlm = (v: bigint) => parseFloat(stroopsToXlm(v));
+  const beneficiarySchedules = schedules.filter(s => s.beneficiary === publicKey);
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
@@ -153,12 +156,9 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
         decimals={4}
         enabled={fired}
       />
-      <AnimatedStatCard
-        label="Claimable Now"
-        value={toXlm(stats.claimableNow)}
-        unit="XLM available"
-        color="text-emerald-400"
-        decimals={4}
+      <AnimatedClaimableCard
+        value={stats.claimableNow}
+        beneficiarySchedules={beneficiarySchedules}
         enabled={fired}
       />
       <AnimatedStatCard
@@ -866,8 +866,9 @@ export default function DashboardPage() {
         )}
 
         {/* Summary stats — animated count-up (#270) */}
-        {publicKey && stats && <AnimatedStats stats={stats} />}
+        {publicKey && stats && <AnimatedStats stats={stats} schedules={schedules} publicKey={publicKey} />}
         {publicKey && <IncomingStreamsList publicKey={publicKey} refreshKey={refreshKey} />}
+        {publicKey && <ActivityFeed publicKey={publicKey} refreshKey={refreshKey} />}
         {publicKey && <StreamsAnalyticsSummary publicKey={publicKey} refreshKey={refreshKey} />}
         {publicKey && loading ? (
           <StreamListSkeleton count={6} />
