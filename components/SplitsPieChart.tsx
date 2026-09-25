@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface PieSlice {
   address: string;
@@ -320,6 +320,8 @@ export default function SplitsPieChart({
   onSelect,
 }: SplitsPieChartProps) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const closeFullscreen = useCallback(() => setIsFullscreen(false), []);
 
   const totalBps = useMemo(
     () => receivers.reduce((sum, r) => sum + r.weightBps, 0),
@@ -347,6 +349,18 @@ export default function SplitsPieChart({
   const arcs = buildArcs(slices, totalBps);
 
   return (
+    <div className="relative">
+    <div className="flex justify-end mb-2">
+      <button
+        type="button"
+        onClick={() => setIsFullscreen(true)}
+        className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 min-h-[36px] transition-colors"
+        aria-label="Open splits pie chart in fullscreen"
+      >
+        <span aria-hidden="true">⛶</span>
+        Fullscreen
+      </button>
+    </div>
     <div className="flex flex-col sm:flex-row items-center gap-6">
       <PieSvg
         arcs={arcs}
@@ -391,6 +405,16 @@ export default function SplitsPieChart({
           );
         })}
       </div>
+    </div>
+
+    {isFullscreen && (
+      <SplitsPieFullscreen
+        arcs={arcs}
+        selectedAddress={selectedAddress}
+        onSelect={onSelect}
+        onClose={closeFullscreen}
+      />
+    )}
     </div>
   );
 }
