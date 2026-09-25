@@ -40,6 +40,10 @@ import OnboardingTour from "@/components/OnboardingTour";
 import CycleCountdown from "@/components/CycleCountdown";
 import IncomingStreamsList from "@/components/IncomingStreamsList";
 import StreamListSkeleton from "@/components/StreamListSkeleton";
+import TopUpModal from "@/components/TopUpModal";
+import StreamExpiryBanner from "@/components/StreamExpiryBanner";
+import StreamBalanceBadge from "@/components/StreamBalanceBadge";
+import { balanceStatus, isExpiringSoon, maxEndTime } from "@/lib/streamHealth";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
@@ -261,14 +265,18 @@ function OutgoingStreamsList({
   schedules,
   publicKey,
   claimableMap,
+  vestedMap,
   onEdit,
   onStop,
+  onTopUp,
 }: {
   schedules: ScheduleData[];
   publicKey: string;
   claimableMap: Map<number, bigint>;
+  vestedMap: Map<number, bigint>;
   onEdit: (s: ScheduleData) => void;
   onStop: (s: ScheduleData) => void;
+  onTopUp: (s: ScheduleData) => void;
 }) {
   const [outgoingTokenFilter, setOutgoingTokenFilter] = useState<string>("all");
   const [outgoingPage, setOutgoingPage] = useState(1);
@@ -339,9 +347,12 @@ function OutgoingStreamsList({
           const tokenSym = isNative ? "XLM" : `${s.token.slice(0, 5)}…`;
           const isBeneficiary = s.beneficiary === publicKey;
           const claimable = claimableMap.get(s.id) ?? 0n;
+          const status = balanceStatus(s, vestedMap.get(s.id));
+          const expiringSoon = status === "healthy" && isExpiringSoon(s, now);
 
           return (
-            <div key={s.id} className="flex items-start justify-between gap-4 py-4 text-sm">
+            <div key={s.id} className="py-4 text-sm">
+            <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1 space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <Link
@@ -353,6 +364,7 @@ function OutgoingStreamsList({
                   <span className="text-xs px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">
                     {s.kind === "LinearWithCliff" ? "Lin+Cliff" : s.kind}
                   </span>
+                  <StreamBalanceBadge status={status} onTopUp={() => onTopUp(s)} />
                 </div>
                 <p className="text-zinc-500 font-mono text-xs truncate">
                   → {s.beneficiary.slice(0, 10)}…{s.beneficiary.slice(-6)}
@@ -401,6 +413,14 @@ function OutgoingStreamsList({
                   </button>
                 )}
               </div>
+            </div>
+            {expiringSoon && (
+              <StreamExpiryBanner
+                scheduleId={s.id}
+                endTime={maxEndTime(s)}
+                onTopUp={() => onTopUp(s)}
+              />
+            )}
             </div>
           );
         })}
