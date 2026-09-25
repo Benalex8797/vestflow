@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 interface PieSlice {
   address: string;
@@ -171,6 +171,140 @@ function PieSvg({
         );
       })}
     </svg>
+  );
+}
+
+interface SplitsPieFullscreenProps {
+  arcs: PieArc[];
+  selectedAddress?: string | null;
+  onSelect?: (address: string | null) => void;
+  onClose: () => void;
+}
+
+/**
+ * Viewport-filling view of the splits pie chart (#807) with larger labels
+ * and a legend listing every receiver's full address and weight.
+ */
+function SplitsPieFullscreen({
+  arcs,
+  selectedAddress,
+  onSelect,
+  onClose,
+}: SplitsPieFullscreenProps) {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const previousFocus = document.activeElement as HTMLElement | null;
+    closeButtonRef.current?.focus();
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus?.();
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Splits pie chart (fullscreen)"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4"
+    >
+      <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative z-10 flex h-full w-full flex-col rounded-2xl border border-white/10 bg-zinc-900 shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between gap-4 border-b border-white/10 px-4 py-3 sm:px-6">
+          <div className="min-w-0">
+            <h2 className="text-lg font-bold">Splits Distribution</h2>
+            <p className="text-sm text-zinc-400">
+              {arcs.length} receiver{arcs.length !== 1 ? "s" : ""}
+            </p>
+          </div>
+          <button
+            ref={closeButtonRef}
+            type="button"
+            onClick={onClose}
+            className="flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors shrink-0 min-h-[44px] min-w-[44px]"
+            aria-label="Exit fullscreen"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="flex flex-1 min-h-0 flex-col lg:flex-row gap-6 p-4 sm:p-6 overflow-y-auto lg:overflow-hidden">
+          <div className="flex flex-1 min-h-[16rem] min-w-0 items-center justify-center">
+            <PieSvg
+              arcs={arcs}
+              selectedAddress={selectedAddress}
+              onSelect={onSelect}
+              hoveredIndex={hoveredIndex}
+              onHover={setHoveredIndex}
+              labelFontSize={11}
+              minLabelSweep={10}
+              className="h-full max-h-[75vh] w-full max-w-[75vh] aspect-square"
+            />
+          </div>
+
+          <div
+            className="flex flex-col gap-2 lg:w-[26rem] lg:shrink-0 lg:overflow-y-auto"
+            role="list"
+            aria-label="Splits receivers legend"
+          >
+            {arcs.map((arc, i) => {
+              const isSelected = selectedAddress === arc.address;
+              const isHovered = hoveredIndex === i;
+              return (
+                <button
+                  key={arc.address + i}
+                  type="button"
+                  role="listitem"
+                  onClick={() =>
+                    onSelect?.(selectedAddress === arc.address ? null : arc.address)
+                  }
+                  onMouseEnter={() => setHoveredIndex(i)}
+                  onMouseLeave={() => setHoveredIndex(null)}
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-colors w-full min-h-[44px] ${
+                    isSelected
+                      ? "bg-white/10 border border-white/20"
+                      : isHovered
+                        ? "bg-white/5 border border-transparent"
+                        : "hover:bg-white/5 border border-transparent"
+                  }`}
+                  aria-label={`${arc.address}: ${arc.percentage.toFixed(2)}% (${arc.weightBps} basis points)`}
+                  aria-selected={isSelected}
+                >
+                  <span
+                    className="w-4 h-4 rounded-full shrink-0"
+                    style={{ backgroundColor: arc.color }}
+                    aria-hidden="true"
+                  />
+                  <span className="font-mono text-xs sm:text-sm text-zinc-200 break-all min-w-0">
+                    {arc.address}
+                  </span>
+                  <span className="ml-auto flex flex-col items-end shrink-0 tabular-nums">
+                    <span className="text-sm font-semibold text-zinc-100">
+                      {arc.percentage.toFixed(2)}%
+                    </span>
+                    <span className="text-xs text-zinc-500">{arc.weightBps} bps</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
