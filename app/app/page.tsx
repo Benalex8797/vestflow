@@ -40,12 +40,17 @@ import OnboardingTour from "@/components/OnboardingTour";
 import CycleCountdown from "@/components/CycleCountdown";
 import IncomingStreamsList from "@/components/IncomingStreamsList";
 import StreamListSkeleton from "@/components/StreamListSkeleton";
+import TopUpModal from "@/components/TopUpModal";
+import StreamExpiryBanner from "@/components/StreamExpiryBanner";
+import StreamBalanceBadge from "@/components/StreamBalanceBadge";
+import { balanceStatus, isExpiringSoon, maxEndTime } from "@/lib/streamHealth";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
 type KindFilter = "all" | "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
 const PAGE_SIZE = 10;
+const STREAM_BALANCE_POLL_MS = 30_000;
 
 interface DashboardStats {
   totalGranted: bigint;
@@ -261,14 +266,18 @@ function OutgoingStreamsList({
   schedules,
   publicKey,
   claimableMap,
+  vestedMap,
   onEdit,
   onStop,
+  onTopUp,
 }: {
   schedules: ScheduleData[];
   publicKey: string;
   claimableMap: Map<number, bigint>;
+  vestedMap: Map<number, bigint>;
   onEdit: (s: ScheduleData) => void;
   onStop: (s: ScheduleData) => void;
+  onTopUp: (s: ScheduleData) => void;
 }) {
   const [outgoingTokenFilter, setOutgoingTokenFilter] = useState<string>("all");
   const [outgoingPage, setOutgoingPage] = useState(1);
@@ -339,9 +348,12 @@ function OutgoingStreamsList({
           const tokenSym = isNative ? "XLM" : `${s.token.slice(0, 5)}…`;
           const isBeneficiary = s.beneficiary === publicKey;
           const claimable = claimableMap.get(s.id) ?? 0n;
+          const status = balanceStatus(s, vestedMap.get(s.id));
+          const expiringSoon = status === "healthy" && isExpiringSoon(s, now);
 
           return (
-            <div key={s.id} className="flex items-start justify-between gap-4 py-4 text-sm">
+            <div key={s.id} className="py-4 text-sm">
+            <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1 space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <Link
@@ -353,6 +365,7 @@ function OutgoingStreamsList({
                   <span className="text-xs px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">
                     {s.kind === "LinearWithCliff" ? "Lin+Cliff" : s.kind}
                   </span>
+                  <StreamBalanceBadge status={status} onTopUp={() => onTopUp(s)} />
                 </div>
                 <p className="text-zinc-500 font-mono text-xs truncate">
                   → {s.beneficiary.slice(0, 10)}…{s.beneficiary.slice(-6)}
@@ -401,6 +414,14 @@ function OutgoingStreamsList({
                   </button>
                 )}
               </div>
+            </div>
+            {expiringSoon && (
+              <StreamExpiryBanner
+                scheduleId={s.id}
+                endTime={maxEndTime(s)}
+                onTopUp={() => onTopUp(s)}
+              />
+            )}
             </div>
           );
         })}
@@ -529,6 +550,8 @@ export default function DashboardPage() {
   const { recentlyViewed } = useRecentlyViewed();
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [claimableMap, setClaimableMap] = useState<Map<number, bigint>>(new Map());
+  const [vestedMap, setVestedMap] = useState<Map<number, bigint>>(new Map());
+  const [topUpTarget, setTopUpTarget] = useState<ScheduleData | null>(null);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [rpcError, setRpcError] = useState(false);
@@ -569,12 +592,13 @@ export default function DashboardPage() {
         const vestedAmounts = await getVestedAmountBulk(userIds, publicKey);
         
         const newClaimableMap = new Map<number, bigint>();
-        const vestedMap = new Map<number, bigint>();
+        const newVestedMap = new Map<number, bigint>();
         userIds.forEach((id, i) => {
           newClaimableMap.set(id, claimableAmounts[i] ?? 0n);
-          vestedMap.set(id, vestedAmounts[i] ?? 0n);
+          newVestedMap.set(id, vestedAmounts[i] ?? 0n);
         });
         setClaimableMap(newClaimableMap);
+        setVestedMap(newVestedMap);
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
@@ -590,7 +614,7 @@ export default function DashboardPage() {
           if (s.beneficiary === publicKey) {
             totalReceiving += s.total_amount;
             claimableNow += newClaimableMap.get(s.id) ?? 0n;
-            totalVested += vestedMap.get(s.id) ?? 0n;
+            totalVested += newVestedMap.get(s.id) ?? 0n;
           }
           if (!s.revoked && vestingProgress(s, now) < 100) {
             activeSchedules++;
@@ -617,6 +641,36 @@ export default function DashboardPage() {
   };
 
   useEffect(() => { load(); }, [publicKey]);
+
+  // Poll vested amounts of active outgoing streams so a stream whose balance
+  // hits zero is flagged within one polling cycle (#810).
+  useEffect(() => {
+    if (!publicKey) return;
+    const outgoingIds = schedules
+      .filter((s) => s.grantor === publicKey && !s.revoked)
+      .map((s) => s.id);
+    if (outgoingIds.length === 0) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const amounts = await getVestedAmountBulk(outgoingIds, publicKey);
+        if (cancelled) return;
+        setVestedMap((prev) => {
+          const next = new Map(prev);
+          outgoingIds.forEach((id, i) => next.set(id, amounts[i] ?? 0n));
+          return next;
+        });
+      } catch {
+        // keep last known values; next cycle will retry
+      }
+    };
+    const id = setInterval(poll, STREAM_BALANCE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [publicKey, schedules]);
 
   // Keyboard shortcut Shift+G to open Give modal (#816)
   useEffect(() => {
@@ -822,8 +876,10 @@ export default function DashboardPage() {
             schedules={schedules}
             publicKey={publicKey}
             claimableMap={claimableMap}
+            vestedMap={vestedMap}
             onEdit={(s) => { window.location.href = `/schedule/${s.id}`; }}
             onStop={(s) => setStopConfirmSchedule(s)}
+            onTopUp={(s) => setTopUpTarget(s)}
           />
         )}
         {publicKey && <RecentGives publicKey={publicKey} refreshKey={refreshKey} />}
@@ -1067,6 +1123,19 @@ export default function DashboardPage() {
         onClose={() => setShowGiveModal(false)}
         onSuccess={() => setRefreshKey(k => k + 1)}
       />
+
+      {/* Top Up Modal for outgoing stream warnings (#809, #810) */}
+      {topUpTarget && (
+        <TopUpModal
+          scheduleId={topUpTarget.id}
+          open={!!topUpTarget}
+          onClose={() => setTopUpTarget(null)}
+          onSuccess={() => {
+            // Reload schedules so the extended end time / new balance clears the warning
+            load();
+          }}
+        />
+      )}
 
       {/* Onboarding Tour */}
       <OnboardingTour />
