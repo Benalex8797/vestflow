@@ -58,6 +58,122 @@ function polarToCartesian(
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
 
+interface PieArc extends PieSlice {
+  startAngle: number;
+  endAngle: number;
+  sweepAngle: number;
+}
+
+const CX = 100;
+const CY = 100;
+const RADIUS = 90;
+
+function buildArcs(slices: PieSlice[], totalBps: number): PieArc[] {
+  let cumulativeAngle = 0;
+  return slices.map((slice) => {
+    const startAngle = cumulativeAngle;
+    const sweepAngle = totalBps > 0 ? (slice.weightBps / totalBps) * 360 : 0;
+    cumulativeAngle += sweepAngle;
+    return { ...slice, startAngle, endAngle: cumulativeAngle, sweepAngle };
+  });
+}
+
+interface PieSvgProps {
+  arcs: PieArc[];
+  selectedAddress?: string | null;
+  onSelect?: (address: string | null) => void;
+  hoveredIndex: number | null;
+  onHover: (index: number | null) => void;
+  className?: string;
+  /** Font size of in-slice percentage labels, in viewBox units. */
+  labelFontSize?: number;
+  /** Minimum slice sweep (degrees) that gets an in-slice label. */
+  minLabelSweep?: number;
+}
+
+function PieSvg({
+  arcs,
+  selectedAddress,
+  onSelect,
+  hoveredIndex,
+  onHover,
+  className,
+  labelFontSize = 8,
+  minLabelSweep = 15,
+}: PieSvgProps) {
+  const cx = CX;
+  const cy = CY;
+  const r = RADIUS;
+
+  return (
+    <svg
+      viewBox="0 0 200 200"
+      className={className}
+      role="img"
+      aria-label="Splits pie chart"
+    >
+      {arcs.map((arc, i) => {
+        const isHovered = hoveredIndex === i;
+        const isSelected = selectedAddress === arc.address;
+        const midAngle = arc.startAngle + arc.sweepAngle / 2;
+        const labelRadius = r * 0.65;
+        const labelPos = polarToCartesian(cx, cy, labelRadius, midAngle);
+
+        return (
+          <g key={arc.address + i}>
+            <path
+              d={describeArc(cx, cy, r, arc.startAngle, arc.endAngle)}
+              fill={arc.color}
+              opacity={isSelected ? 1 : isHovered ? 0.9 : 0.75}
+              stroke="var(--background)"
+              strokeWidth={isSelected ? 2 : 1}
+              style={{
+                cursor: "pointer",
+                transition: "opacity 0.15s, stroke-width 0.15s",
+                transform: isHovered ? "scale(1.03)" : undefined,
+                transformOrigin: `${cx}px ${cy}px`,
+              }}
+              onMouseEnter={() => onHover(i)}
+              onMouseLeave={() => onHover(null)}
+              onClick={() =>
+                onSelect?.(
+                  selectedAddress === arc.address ? null : arc.address,
+                )
+              }
+              role="button"
+              aria-label={`${arc.label}: ${arc.percentage.toFixed(1)}%`}
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect?.(
+                    selectedAddress === arc.address ? null : arc.address,
+                  );
+                }
+              }}
+            />
+            {arc.sweepAngle > minLabelSweep && (
+              <text
+                x={labelPos.x}
+                y={labelPos.y}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fill="white"
+                fontSize={labelFontSize}
+                fontWeight="bold"
+                pointerEvents="none"
+                aria-hidden="true"
+              >
+                {arc.percentage.toFixed(0)}%
+              </text>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 interface SplitsPieChartProps {
   receivers: Array<{ address: string; weightBps: number }>;
   selectedAddress?: string | null;
@@ -94,90 +210,18 @@ export default function SplitsPieChart({
     );
   }
 
-  const cx = 100;
-  const cy = 100;
-  const r = 90;
-  let cumulativeAngle = 0;
-
-  const arcs = slices.map((slice) => {
-    const startAngle = cumulativeAngle;
-    const sweepAngle = (slice.weightBps / totalBps) * 360;
-    cumulativeAngle += sweepAngle;
-    return {
-      ...slice,
-      startAngle,
-      endAngle: cumulativeAngle,
-      sweepAngle,
-    };
-  });
+  const arcs = buildArcs(slices, totalBps);
 
   return (
     <div className="flex flex-col sm:flex-row items-center gap-6">
-      <svg
-        viewBox="0 0 200 200"
+      <PieSvg
+        arcs={arcs}
+        selectedAddress={selectedAddress}
+        onSelect={onSelect}
+        hoveredIndex={hoveredIndex}
+        onHover={setHoveredIndex}
         className="w-48 h-48 shrink-0"
-        role="img"
-        aria-label="Splits pie chart"
-      >
-        {arcs.map((arc, i) => {
-          const isHovered = hoveredIndex === i;
-          const isSelected = selectedAddress === arc.address;
-          const midAngle = arc.startAngle + arc.sweepAngle / 2;
-          const labelRadius = r * 0.65;
-          const labelPos = polarToCartesian(cx, cy, labelRadius, midAngle);
-
-          return (
-            <g key={arc.address + i}>
-              <path
-                d={describeArc(cx, cy, r, arc.startAngle, arc.endAngle)}
-                fill={arc.color}
-                opacity={isSelected ? 1 : isHovered ? 0.9 : 0.75}
-                stroke="var(--background)"
-                strokeWidth={isSelected ? 2 : 1}
-                style={{
-                  cursor: "pointer",
-                  transition: "opacity 0.15s, stroke-width 0.15s",
-                  transform: isHovered ? "scale(1.03)" : undefined,
-                  transformOrigin: `${cx}px ${cy}px`,
-                }}
-                onMouseEnter={() => setHoveredIndex(i)}
-                onMouseLeave={() => setHoveredIndex(null)}
-                onClick={() =>
-                  onSelect?.(
-                    selectedAddress === arc.address ? null : arc.address,
-                  )
-                }
-                role="button"
-                aria-label={`${arc.label}: ${arc.percentage.toFixed(1)}%`}
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onSelect?.(
-                      selectedAddress === arc.address ? null : arc.address,
-                    );
-                  }
-                }}
-              />
-              {arc.sweepAngle > 15 && (
-                <text
-                  x={labelPos.x}
-                  y={labelPos.y}
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                  fill="white"
-                  fontSize="8"
-                  fontWeight="bold"
-                  pointerEvents="none"
-                  aria-hidden="true"
-                >
-                  {arc.percentage.toFixed(0)}%
-                </text>
-              )}
-            </g>
-          );
-        })}
-      </svg>
+      />
 
       <div className="flex flex-col gap-2 text-sm min-w-0" role="list" aria-label="Splits receivers">
         {arcs.map((arc, i) => {
