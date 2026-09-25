@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { NATIVE_TOKEN, NETWORK, stroopsToXlm } from "@/lib/stellar";
+import StreamListSkeleton from "@/components/StreamListSkeleton";
 
 interface IncomingStream {
   sender: string;
@@ -65,11 +66,7 @@ export default function IncomingStreamsList({ publicKey, refreshKey }: IncomingS
   }, [fetchStreams, refreshKey]);
 
   if (loading) {
-    return (
-      <div className="card p-4 mb-6">
-        <p className="text-sm text-zinc-400">Loading incoming streams...</p>
-      </div>
-    );
+    return <StreamListSkeleton />;
   }
 
   if (streams.length === 0) return null;
