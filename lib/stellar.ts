@@ -714,6 +714,56 @@ export async function transferBeneficiary(
   ]);
 }
 
+export interface StreamReceiverInput {
+  receiver: string;
+  amt_per_sec: bigint;
+}
+
+export async function setStream(
+  publicKey: string,
+  token: string,
+  receivers: StreamReceiverInput[],
+  topUp: bigint = 0n,
+): Promise<string> {
+  const receiversScVal = xdr.ScVal.scvVec(
+    receivers.map((r) =>
+      nativeToScVal(
+        {
+          receiver: nativeToScVal(r.receiver, { type: "address" }),
+          amt_per_sec: nativeToScVal(r.amt_per_sec, { type: "i128" }),
+        },
+        { type: "map" }
+      )
+    )
+  );
+  return buildAndSend(publicKey, "set_stream", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(token, { type: "address" }),
+    receiversScVal,
+    nativeToScVal(topUp, { type: "i128" }),
+  ]);
+}
+
+export async function batchGive(
+  publicKey: string,
+  receivers: string[],
+  amounts: bigint[],
+  token: string = NATIVE_TOKEN,
+): Promise<string> {
+  const receiversScVal = xdr.ScVal.scvVec(
+    receivers.map((r) => nativeToScVal(r, { type: "address" }))
+  );
+  const amountsScVal = xdr.ScVal.scvVec(
+    amounts.map((a) => nativeToScVal(a, { type: "i128" }))
+  );
+  return buildAndSend(publicKey, "batch_give", [
+    nativeToScVal(publicKey, { type: "address" }),
+    receiversScVal,
+    amountsScVal,
+    nativeToScVal(token, { type: "address" }),
+  ]);
+}
+
 /**
  * Squeeze a stream — collect tokens dripped so far in the current (not yet settled) cycle.
  * The receiver can call this to claim accrued tokens without waiting for full stream settlement.

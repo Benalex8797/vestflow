@@ -1514,6 +1514,69 @@ export function queryDripsStreams(params: {
 }
 
 /**
+ * Active incoming streams for a receiver — streams opened by other senders
+ * where `receiver = ?`, not closed, and not past their estimated end time.
+ * Keyset-paginated by (created_at DESC, id DESC), mirroring queryDripsStreams.
+ */
+export function queryIncomingStreams(params: {
+  receiver: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<{
+  sender: string;
+  token: string;
+  rate_per_second: string;
+  estimated_end_time: number | null;
+  start_time: number;
+}> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (
+    cursor === null ||
+    (params.cursor &&
+      (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))
+  )
+    return null;
+  const now = Math.floor(Date.now() / 1000);
+  const values: unknown[] = [params.receiver, now];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (created_at < ? OR (created_at = ? AND id < ?))";
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network)
+    .prepare(
+      `SELECT id, account AS sender, token, rate_per_second, estimated_end_time, created_at AS start_time, created_at
+     FROM drips_streams
+     WHERE receiver = ? AND ended_at IS NULL
+       AND (estimated_end_time IS NULL OR estimated_end_time > ?) ${after}
+     ORDER BY created_at DESC, id DESC LIMIT ?`,
+    )
+    .all(...values, limit + 1) as ({
+    id: string;
+    sender: string;
+    token: string;
+    rate_per_second: string;
+    estimated_end_time: number | null;
+    start_time: number;
+    created_at: number;
+  })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(
+      ({ id: _id, created_at: _createdAt, ...stream }) => stream,
+    ),
+    nextCursor:
+      hasMore && last
+        ? encodeDripsCursor({ createdAt: last.created_at, id: last.id })
+        : null,
+  };
+}
+
+/**
  * The most recent last-updated timestamp across an account's active streams.
  * Used to derive an `ETag` for `GET /streams` so the cache invalidates the
  * instant new stream data lands.
@@ -2814,6 +2877,12 @@ export function queryStreamCycles(params: {
   account?: string;
   token?: string;
   limit?: number;
+  /** Filter to cycles ending at or after this unix timestamp. */
+  from?: number;
+  /** Filter to cycles ending at or before this unix timestamp. */
+  to?: number;
+  /** Opaque cursor for keyset pagination (base64url JSON). */
+  cursor?: string;
   network?: NetworkName;
 }): StreamCycleRow[] {
   const db = getDb(params.network);
@@ -2828,6 +2897,33 @@ export function queryStreamCycles(params: {
     conditions.push("token = ?");
     values.push(params.token);
   }
+  if (params.from != null && Number.isFinite(params.from)) {
+    conditions.push("cycle_end_timestamp >= ?");
+    values.push(Math.floor(params.from));
+  }
+  if (params.to != null && Number.isFinite(params.to)) {
+    conditions.push("cycle_end_timestamp <= ?");
+    values.push(Math.floor(params.to));
+  }
+  if (params.cursor) {
+    const decoded = decodeDripsCursor(params.cursor);
+    if (
+      decoded === null ||
+      typeof decoded.createdAt !== "number"
+    ) {
+      return [];
+    }
+    // Keyset on (cycle_end_timestamp DESC, cycle_end_ledger DESC).
+    conditions.push(
+      "(cycle_end_timestamp < ? OR (cycle_end_timestamp = ? AND cycle_end_ledger < ?))",
+    );
+    const ledger = typeof decoded.id === "string" ? Number(decoded.id) : 0;
+    values.push(
+      decoded.createdAt,
+      decoded.createdAt,
+      Number.isFinite(ledger) ? ledger : 0,
+    );
+  }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const limit = Math.min(params.limit ?? 50, 200);
@@ -2837,9 +2933,24 @@ export function queryStreamCycles(params: {
       `SELECT account, token, cycle_end_ledger, cycle_end_timestamp, amount_received, created_at
        FROM stream_cycles
        ${whereClause}
-       ORDER BY cycle_end_ledger DESC LIMIT ?`,
+       ORDER BY cycle_end_timestamp DESC, cycle_end_ledger DESC LIMIT ?`,
     )
     .all(...values, limit) as StreamCycleRow[];
+}
+
+/**
+ * Encode a keyset cursor for stream-cycle pagination.
+ * Exposed so API routes can build `next_cursor` without reaching into
+ * cursor internals.
+ */
+export function encodeStreamCycleCursor(cycle: {
+  cycle_end_timestamp: number;
+  cycle_end_ledger: number;
+}): string {
+  return encodeDripsCursor({
+    createdAt: cycle.cycle_end_timestamp,
+    id: String(cycle.cycle_end_ledger),
+  });
 }
 
 // ── Squeeze Events ────────────────────────────────────────────────────
