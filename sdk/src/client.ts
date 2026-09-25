@@ -1908,3 +1908,82 @@ export class VestflowClient {
   }
 }
 
+
+  /**
+   * Configure splits receivers for an account wrapping the set_splits contract call.
+   *
+   * Splits divide incoming streams among multiple receivers according to their
+   * configured weight in basis points. All weights must sum to exactly 10000.
+   *
+   * @param account - Stellar address configuring its own splits must sign the transaction.
+   * @param receivers - Array of receivers with their weight allocations. Empty array clears splits.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction result with hash and settlement status.
+   * @throws If weights do not sum to 10000 any weight is zero or negative or addresses are invalid.
+   *
+   * @example
+   * ```typescript
+   * await client.setSplits(myAddress, [
+   *   { address: "GABC...", weightBps: 5000 },
+   *   { address: "GDEF...", weightBps: 5000 }
+   * ], signTransaction);
+   * ```
+   */
+  async setSplits(
+    account: string,
+    receivers: SplitsReceiver[],
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<TransactionResult> {
+    if (!StrKey.isValidEd25519PublicKey(account)) {
+      throw new Error("account must be a valid Stellar public key");
+    }
+
+    if (receivers.length === 0) {
+      const args: xdr.ScVal[] = [
+        nativeToScVal(account, { type: "address" }),
+        xdr.ScVal.scvVec([]),
+      ];
+      return this.submitAndSettle(account, "set_splits", args, signer);
+    }
+
+    for (const [i, receiver] of receivers.entries()) {
+      if (!StrKey.isValidEd25519PublicKey(receiver.address) && !StrKey.isValidContract(receiver.address)) {
+        throw new Error(`receivers[${i}].address must be a valid Stellar address`);
+      }
+      if (receiver.weightBps <= 0) {
+        throw new Error(`receivers[${i}].weightBps must be greater than 0`);
+      }
+      if (receiver.weightBps > 10000) {
+        throw new Error(`receivers[${i}].weightBps must not exceed 10000`);
+      }
+    }
+
+    const totalWeight = receivers.reduce((sum, r) => sum + r.weightBps, 0);
+    if (totalWeight !== 10000) {
+      throw new Error(`Total weight must equal 10000 basis points. Got ${totalWeight}.`);
+    }
+
+    const receiversVal = xdr.ScVal.scvVec(
+      receivers.map((r) =>
+        xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("account"),
+            val: nativeToScVal(r.address, { type: "address" }),
+          }),
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("weight_bps"),
+            val: nativeToScVal(r.weightBps, { type: "u32" }),
+          }),
+        ])
+      )
+    );
+
+    const args: xdr.ScVal[] = [
+      nativeToScVal(account, { type: "address" }),
+      receiversVal,
+    ];
+
+    return this.submitAndSettle(account, "set_splits", args, signer);
+  }
+}
+
