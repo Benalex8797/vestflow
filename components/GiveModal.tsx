@@ -1,8 +1,14 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useWallet } from "@/lib/WalletContext";
-import { stroopsToXlm } from "@/lib/stellar";
+import { stroopsToXlm, NATIVE_TOKEN } from "@/lib/stellar";
 import { useToast } from "@/components/Toast";
+import {
+  GiveDraft,
+  loadGiveDraft,
+  saveGiveDraft,
+  clearGiveDraft,
+} from "@/lib/giveDraft";
 
 interface GiveModalProps {
   open: boolean;
@@ -17,18 +23,54 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [txHash, setTxHash] = useState<string | null>(null);
+  const [pendingDraft, setPendingDraft] = useState<GiveDraft | null>(null);
   const { addToast, updateToast } = useToast();
 
+  // The modal only transfers the native token today; it's stored with the
+  // draft so a future token picker can restore it too.
+  const token = NATIVE_TOKEN;
+
+  // Latest field values, read when the modal closes to persist a draft (#808)
+  const fieldsRef = useRef({ recipient, amount });
+  fieldsRef.current = { recipient, amount };
+  const submittedRef = useRef(false);
+  const wasOpenRef = useRef(false);
+
   useEffect(() => {
-    if (!open) {
-      setAmount("");
-      setRecipient("");
-      setErr("");
-      setTxHash(null);
+    if (open) {
+      wasOpenRef.current = true;
+      submittedRef.current = false;
+      setPendingDraft(loadGiveDraft());
+      return;
     }
-  }, [open]);
+    if (wasOpenRef.current && !submittedRef.current) {
+      saveGiveDraft({
+        receiver: fieldsRef.current.recipient,
+        token,
+        amount: fieldsRef.current.amount,
+      });
+    }
+    wasOpenRef.current = false;
+    setAmount("");
+    setRecipient("");
+    setErr("");
+    setTxHash(null);
+    setPendingDraft(null);
+  }, [open, token]);
 
   if (!open) return null;
+
+  const handleRestoreDraft = () => {
+    if (!pendingDraft) return;
+    setRecipient(pendingDraft.receiver);
+    setAmount(pendingDraft.amount);
+    setPendingDraft(null);
+  };
+
+  const handleDiscardDraft = () => {
+    clearGiveDraft();
+    setPendingDraft(null);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,6 +104,8 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
       // For now, simulate success after a brief delay
       await new Promise((resolve) => setTimeout(resolve, 1500));
       setTxHash("SIMULATED_TX_HASH");
+      submittedRef.current = true;
+      clearGiveDraft();
       updateToast(toastId, {
         status: "success",
         title: "Transfer successful",
@@ -96,6 +140,37 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
             ✕
           </button>
         </div>
+
+        {pendingDraft && (
+          <div
+            role="alertdialog"
+            aria-label="Restore draft"
+            className="mb-4 rounded-xl border border-violet-500/30 bg-violet-500/10 p-3 text-sm"
+          >
+            <p className="font-medium text-violet-200">Restore draft?</p>
+            <p className="mt-1 text-xs text-zinc-400 break-all">
+              {pendingDraft.amount ? `${pendingDraft.amount} XLM` : "No amount"}
+              {pendingDraft.receiver ? ` → ${pendingDraft.receiver.slice(0, 10)}…${pendingDraft.receiver.slice(-6)}` : ""}
+              {" · saved "}{new Date(pendingDraft.savedAt).toLocaleString()}
+            </p>
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                onClick={handleRestoreDraft}
+                className="flex-1 min-h-[36px] rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white transition-colors"
+              >
+                Restore
+              </button>
+              <button
+                type="button"
+                onClick={handleDiscardDraft}
+                className="flex-1 min-h-[36px] rounded-lg border border-white/10 text-xs font-semibold text-zinc-300 hover:border-white/20 transition-colors"
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div>
