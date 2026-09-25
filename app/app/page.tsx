@@ -592,13 +592,13 @@ export default function DashboardPage() {
         const vestedAmounts = await getVestedAmountBulk(userIds, publicKey);
         
         const newClaimableMap = new Map<number, bigint>();
-        const vestedMap = new Map<number, bigint>();
+        const newVestedMap = new Map<number, bigint>();
         userIds.forEach((id, i) => {
           newClaimableMap.set(id, claimableAmounts[i] ?? 0n);
-          vestedMap.set(id, vestedAmounts[i] ?? 0n);
+          newVestedMap.set(id, vestedAmounts[i] ?? 0n);
         });
         setClaimableMap(newClaimableMap);
-        setVestedMap(vestedMap);
+        setVestedMap(newVestedMap);
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
@@ -614,7 +614,7 @@ export default function DashboardPage() {
           if (s.beneficiary === publicKey) {
             totalReceiving += s.total_amount;
             claimableNow += newClaimableMap.get(s.id) ?? 0n;
-            totalVested += vestedMap.get(s.id) ?? 0n;
+            totalVested += newVestedMap.get(s.id) ?? 0n;
           }
           if (!s.revoked && vestingProgress(s, now) < 100) {
             activeSchedules++;
