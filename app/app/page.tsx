@@ -38,6 +38,7 @@ import WalletQrModal from "@/components/WalletQrModal";
 import OnboardingTour from "@/components/OnboardingTour";
 import CycleCountdown from "@/components/CycleCountdown";
 import IncomingStreamsList from "@/components/IncomingStreamsList";
+import StreamListSkeleton from "@/components/StreamListSkeleton";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
@@ -729,7 +730,9 @@ export default function DashboardPage() {
         {publicKey && stats && <AnimatedStats stats={stats} />}
         {publicKey && <IncomingStreamsList publicKey={publicKey} refreshKey={refreshKey} />}
         {publicKey && <StreamsAnalyticsSummary publicKey={publicKey} refreshKey={refreshKey} />}
-        {publicKey && schedules.length > 0 && (
+        {publicKey && loading ? (
+          <StreamListSkeleton count={6} />
+        ) : publicKey && schedules.length > 0 && (
           <OutgoingStreamsList
             schedules={schedules}
             publicKey={publicKey}

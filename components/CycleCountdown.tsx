@@ -27,10 +27,9 @@ interface CycleCountdownProps {
 }
 
 export default function CycleCountdown({ onCycleEnd }: CycleCountdownProps) {
-  const [remaining, setRemaining] = useState(() => {
-    const end = computeNextCycleEnd();
-    return Math.max(0, end - Math.floor(Date.now() / 1000));
-  });
+  const [remaining, setRemaining] = useState<number | null>(null);
+  const [announcement, setAnnouncement] = useState("Calculating…");
+  const lastAnnouncementRef = useRef(0);
   const [settling, setSettling] = useState(false);
 
   const onCycleEndRef = useRef(onCycleEnd);
@@ -38,7 +37,10 @@ export default function CycleCountdown({ onCycleEnd }: CycleCountdownProps) {
 
   useEffect(() => {
     const nextCycleEnd = computeNextCycleEnd();
-    setRemaining(Math.max(0, nextCycleEnd - Math.floor(Date.now() / 1000)));
+    const initial = Math.max(0, nextCycleEnd - Math.floor(Date.now() / 1000));
+    setRemaining(initial);
+    setAnnouncement(`Next settlement in ${formatTime(initial)}`);
+    lastAnnouncementRef.current = Date.now();
 
     let settlingTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -47,6 +49,10 @@ export default function CycleCountdown({ onCycleEnd }: CycleCountdownProps) {
       const end = computeNextCycleEnd();
       const rem = Math.max(0, end - now);
       setRemaining(rem);
+      if (Date.now() - lastAnnouncementRef.current >= 60_000) {
+        setAnnouncement(`Next settlement in ${formatTime(rem)}`);
+        lastAnnouncementRef.current = Date.now();
+      }
 
       if (rem <= 0) {
         setSettling(true);
@@ -69,7 +75,7 @@ export default function CycleCountdown({ onCycleEnd }: CycleCountdownProps) {
     };
   }, []);
 
-  const isLow = remaining > 0 && remaining <= 300;
+  const isLow = remaining !== null && remaining > 0 && remaining <= 300;
 
   return (
     <div
@@ -80,10 +86,9 @@ export default function CycleCountdown({ onCycleEnd }: CycleCountdownProps) {
           ? "border-amber-500/30 bg-amber-500/5"
           : ""
       }`}
-      role="status"
-      aria-live="polite"
-      aria-label={`Next settlement in ${formatTime(remaining)}`}
+      aria-label={announcement}
     >
+      <span className="sr-only" aria-live="polite">{announcement}</span>
       <div
         className={`w-2 h-2 rounded-full shrink-0 ${
           settling
@@ -107,7 +112,7 @@ export default function CycleCountdown({ onCycleEnd }: CycleCountdownProps) {
               : "text-zinc-200"
           }`}
         >
-          {settling ? "Processing\u2026" : formatTime(remaining)}
+          {settling ? "Processing\u2026" : remaining === null ? "Calculating\u2026" : formatTime(remaining)}
         </p>
       </div>
     </div>
