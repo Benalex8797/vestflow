@@ -34,6 +34,7 @@ export default function MyListsPage() {
   const { publicKey, setPublicKey } = useWallet();
   const { addToast } = useToast();
   const [lists, setLists] = useState<ManagedList[]>([]);
+  const [memberListsCount, setMemberListsCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [listName, setListName] = useState("");
   const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
@@ -43,6 +44,7 @@ export default function MyListsPage() {
   const loadLists = async () => {
     if (!publicKey) {
       setLists([]);
+      setMemberListsCount(0);
       setLoading(false);
       return;
     }
@@ -73,6 +75,29 @@ export default function MyListsPage() {
         };
       }));
       setLists(managed);
+
+      // Count lists where user is a member (#815)
+      try {
+        const allListsResponse = await fetch(`/api/lists?limit=1000`);
+        if (allListsResponse.ok) {
+          const allListsData = await allListsResponse.json();
+          const allLists = (allListsData.lists || []) as DripsListData[];
+          let memberCount = 0;
+          for (const list of allLists) {
+            const membersResponse = await fetch(`/api/lists/${encodeURIComponent(list.id)}/members?limit=100`);
+            if (membersResponse.ok) {
+              const membersData = await membersResponse.json();
+              const members = (membersData.members || []) as Member[];
+              if (members.some(m => m.address === publicKey)) {
+                memberCount++;
+              }
+            }
+          }
+          setMemberListsCount(memberCount);
+        }
+      } catch {
+        setMemberListsCount(0);
+      }
     } catch (error) {
       addToast({ status: "error", title: "Lists unavailable", message: error instanceof Error ? error.message : "Could not load your lists" });
     } finally {
@@ -175,6 +200,20 @@ export default function MyListsPage() {
           <div>
             <h1 className="text-3xl font-bold text-white">My Drips Lists</h1>
             <p className="text-zinc-400 mt-1 text-sm">Manage your recipient lists and see their active funders.</p>
+            {publicKey && (
+              <div className="flex flex-wrap gap-3 mt-4">
+                {lists.length > 0 && (
+                  <a href="#owned-lists" className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-violet-500/10 border border-violet-500/30 text-violet-300 text-sm hover:bg-violet-500/20 transition-colors">
+                    📋 {lists.length} {lists.length === 1 ? 'list' : 'lists'} owned
+                  </a>
+                )}
+                {memberListsCount > 0 && (
+                  <a href="#member-lists" className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm hover:bg-emerald-500/20 transition-colors">
+                    👥 Member of {memberListsCount} {memberListsCount === 1 ? 'list' : 'lists'}
+                  </a>
+                )}
+              </div>
+            )}
           </div>
           {!publicKey && <button type="button" onClick={connect} className="btn-primary rounded-lg px-4 py-2 text-sm font-semibold text-white">Connect Wallet</button>}
         </div>
@@ -202,7 +241,7 @@ export default function MyListsPage() {
         ) : lists.length === 0 ? (
           <div className="card p-12 text-center text-zinc-400">You do not own any Drips lists yet.</div>
         ) : (
-          <div className="space-y-6">
+          <div id="owned-lists" className="space-y-6">
             {lists.map(list => (
               <section key={list.id} className="card p-6 space-y-5">
                 <div className="flex items-start justify-between gap-4 flex-wrap">
