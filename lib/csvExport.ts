@@ -135,8 +135,54 @@ export function buildCombinedExportCSV(schedules: ScheduleData[]): string {
   return `VESTING SCHEDULES\n${schedulesCSV}\n\n\nCLAIM HISTORY\n${claimHistoryCSV}`;
 }
 
+export interface TransactionHistoryExportRow {
+  type: string;
+  counterparty: string;
+  token: string;
+  amount: string;
+  timestamp: string;
+}
+
+export function buildTransactionHistoryCSV(rows: TransactionHistoryExportRow[]): string {
+  const headers = ["type", "counterparty", "token", "amount", "timestamp"];
+  const escape = (v: string | number) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const headerRow = headers.map(escape).join(",");
+  const dataRows = rows.map((r) =>
+    [r.type, r.counterparty, r.token, r.amount, r.timestamp].map(escape).join(",")
+  );
+  return "\uFEFF" + [headerRow, ...dataRows].join("\n");
+}
+
+export function exportTransactionHistoryCSV(
+  rows: TransactionHistoryExportRow[],
+  walletAddress?: string | null
+): void {
+  const csv = buildTransactionHistoryCSV(rows);
+  let dateRange = "";
+  if (rows.length > 0) {
+    const dates = rows
+      .map((r) => r.timestamp)
+      .filter(Boolean)
+      .map((t) => new Date(t).getTime())
+      .filter((t) => !isNaN(t))
+      .sort((a, b) => a - b);
+    if (dates.length > 0) {
+      const minDate = new Date(dates[0]).toISOString().split("T")[0];
+      const maxDate = new Date(dates[dates.length - 1]).toISOString().split("T")[0];
+      dateRange = `${minDate}_to_${maxDate}`;
+    }
+  }
+  if (!dateRange) {
+    dateRange = new Date().toISOString().split("T")[0];
+  }
+  const addr = walletAddress ? `${walletAddress.slice(0, 8)}...${walletAddress.slice(-4)}` : "wallet";
+  const filename = `vestflow-transactions-${addr}-${dateRange}.csv`;
+  downloadCSV(csv, filename);
+}
+
 export function downloadCSV(content: string, filename: string): void {
-  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+  const bomContent = content.startsWith("\uFEFF") ? content : "\uFEFF" + content;
+  const blob = new Blob([bomContent], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

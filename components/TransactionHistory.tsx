@@ -7,6 +7,8 @@ import SearchFilterBar from "@/components/SearchFilterBar";
 import { NoSearchResultsEmptyState } from "@/components/EmptyState";
 import { matchesAddressOrToken } from "@/lib/tokens";
 
+import { exportTransactionHistoryCSV } from "@/lib/csvExport";
+
 interface IndexedEvent {
   id: string;
   event_type: string;
@@ -126,6 +128,17 @@ export default function TransactionHistory() {
   // Reset to page 1 when filtered events count changes
   useEffect(() => { setPage(1); }, [filteredEvents.length, eventFilter, q]);
 
+  const handleDownloadCSV = () => {
+    const exportRows = filteredEvents.map(event => ({
+      type: eventLabel(event),
+      counterparty: (event.beneficiary || event.grantor || ""),
+      token: event.token || "",
+      amount: eventAmount(event) !== null ? stroopsToXlm(BigInt(eventAmount(event)!)) : "",
+      timestamp: event.ledger_closed_at,
+    }));
+    exportTransactionHistoryCSV(exportRows, publicKey);
+  };
+
   if (!publicKey) {
     return (
       <div className="card p-8 text-center text-zinc-400">
@@ -164,30 +177,46 @@ export default function TransactionHistory() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Search / Filter bar (Issue #647) */}
-      <div className="mb-2">
-        <SearchFilterBar
-          value={query}
-          onChange={setQuery}
-          placeholder="Filter history by address prefix, token symbol, schedule ID, or event type…"
-          resultCount={filteredEvents.length}
-          totalCount={events.length}
-        />
-        <label className="flex items-center gap-2 text-sm text-zinc-400">
-          <span className="sr-only">Filter by event type</span>
-          <select
-            value={eventFilter}
-            onChange={event => setEventFilter(event.target.value as EventFilter)}
-            className="input w-full sm:w-48"
-            aria-label="Filter by event type"
+      {/* Search / Filter bar (Issue #647) & Download CSV (Issue #798) */}
+      <div className="mb-2 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+        <div className="flex-1">
+          <SearchFilterBar
+            value={query}
+            onChange={setQuery}
+            placeholder="Filter history by address prefix, token symbol, schedule ID, or event type…"
+            resultCount={filteredEvents.length}
+            totalCount={events.length}
+          />
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <label className="flex items-center gap-2 text-sm text-zinc-400">
+            <span className="sr-only">Filter by event type</span>
+            <select
+              value={eventFilter}
+              onChange={event => setEventFilter(event.target.value as EventFilter)}
+              className="input w-full sm:w-48"
+              aria-label="Filter by event type"
+            >
+              <option value="all">All event types</option>
+              <option value="stream">Streams</option>
+              <option value="give">Gives</option>
+              <option value="collect">Collects</option>
+              <option value="split">Splits</option>
+            </select>
+          </label>
+          <button
+            onClick={handleDownloadCSV}
+            disabled={filteredEvents.length === 0}
+            className="text-sm text-zinc-300 hover:text-white border border-white/10 hover:border-white/20 bg-white/5 rounded-lg px-3 py-2 transition-colors disabled:opacity-40 flex items-center gap-1.5 shrink-0"
+            title="Download visible transactions as CSV"
+            aria-label="Download CSV"
           >
-            <option value="all">All event types</option>
-            <option value="stream">Streams</option>
-            <option value="give">Gives</option>
-            <option value="collect">Collects</option>
-            <option value="split">Splits</option>
-          </select>
-        </label>
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Download CSV
+          </button>
+        </div>
       </div>
 
       {filteredEvents.length === 0 ? (

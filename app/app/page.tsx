@@ -25,6 +25,7 @@ import {
   NETWORK,
   stroopsToXlm,
   revokeSchedule,
+  setStream,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
@@ -400,9 +401,10 @@ function OutgoingStreamsList({
                 </button>
                 <button
                   onClick={() => onStop(s)}
+                  aria-label="Stop stream"
                   className="px-3 py-2 min-h-[44px] rounded-lg text-xs font-medium bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-colors"
                 >
-                  Stop
+                  Stop stream
                 </button>
                 {isBeneficiary && claimable > 0n && (
                   <button
@@ -1141,52 +1143,112 @@ export default function DashboardPage() {
       {/* Onboarding Tour */}
       <OnboardingTour />
 
-      {/* Stop Stream confirmation dialog */}
-      {stopConfirmSchedule && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Stop stream confirmation"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-        >
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setStopConfirmSchedule(null)} />
-          <div className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl">
-            <h2 className="text-lg font-bold mb-2">Stop Stream?</h2>
-            <p className="text-sm text-zinc-400 mb-5">
-              This will revoke schedule #{stopConfirmSchedule.id} and stop all future vesting. Unvested tokens will be returned to your wallet.
-              This action cannot be undone.
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setStopConfirmSchedule(null)}
-                disabled={stoppingId !== null}
-                className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={stoppingId !== null}
-                onClick={async () => {
-                  if (!publicKey || !stopConfirmSchedule) return;
-                  setStoppingId(stopConfirmSchedule.id);
-                  try {
-                    await revokeSchedule(publicKey, stopConfirmSchedule.id);
-                    setStopConfirmSchedule(null);
-                    setRefreshKey((k) => k + 1);
-                  } catch {
-                    // leave dialog open on error so user sees failure
-                  } finally {
-                    setStoppingId(null);
-                  }
-                }}
-                className="flex-1 rounded-xl bg-red-600 hover:bg-red-700 py-2.5 text-sm font-semibold transition-colors disabled:opacity-50"
-              >
-                {stoppingId === stopConfirmSchedule.id ? "Stopping…" : "Stop Stream"}
-              </button>
+      {/* Stop Stream confirmation dialog (#801) */}
+      {stopConfirmSchedule && (() => {
+        const now = Math.floor(Date.now() / 1000);
+        const vested = vestedMap.get(stopConfirmSchedule.id) ?? (
+          (stopConfirmSchedule.total_amount * BigInt(vestingProgress(stopConfirmSchedule, now))) / 100n
+        );
+        const remainingStreamable = stopConfirmSchedule.total_amount > vested
+          ? stopConfirmSchedule.total_amount - vested
+          : 0n;
+        const isNative = stopConfirmSchedule.token === NATIVE_TOKEN;
+        const tokenLabel = isNative ? "XLM" : `${stopConfirmSchedule.token.slice(0, 8)}…${stopConfirmSchedule.token.slice(-4)}`;
+
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Stop stream confirmation"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          >
+            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setStopConfirmSchedule(null)} />
+            <div className="relative z-10 w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl space-y-4">
+              <div>
+                <h2 className="text-lg font-bold text-white">Stop Stream?</h2>
+                <p className="text-sm text-zinc-400 mt-1">
+                  Stopping this stream will halt all future token distributions to the receiver.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Receiver</span>
+                  <span className="font-mono text-zinc-200" title={stopConfirmSchedule.beneficiary}>
+                    {stopConfirmSchedule.beneficiary.slice(0, 10)}…{stopConfirmSchedule.beneficiary.slice(-6)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Token</span>
+                  <span className="font-medium text-zinc-200">{tokenLabel}</span>
+                </div>
+                <div className="flex items-center justify-between border-t border-white/5 pt-2">
+                  <span className="text-zinc-400">Remaining streamable balance</span>
+                  <span className="font-semibold text-amber-400">
+                    {stroopsToXlm(remainingStreamable)} {tokenLabel}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Estimated unused balance remaining</span>
+                  <span className="font-semibold text-emerald-400">
+                    {stroopsToXlm(remainingStreamable)} {tokenLabel}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setStopConfirmSchedule(null)}
+                  disabled={stoppingId !== null}
+                  className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={stoppingId !== null}
+                  onClick={async () => {
+                    if (!publicKey || !stopConfirmSchedule) return;
+                    setStoppingId(stopConfirmSchedule.id);
+                    try {
+                      try {
+                        await setStream(
+                          publicKey,
+                          stopConfirmSchedule.token,
+                          [{ receiver: stopConfirmSchedule.beneficiary, amt_per_sec: 0n }],
+                          0n
+                        );
+                      } catch {
+                        await revokeSchedule(publicKey, stopConfirmSchedule.id);
+                      }
+                      setStopConfirmSchedule(null);
+                      setRefreshKey((k) => k + 1);
+                    } catch {
+                      // leave dialog open on error so user sees failure
+                    } finally {
+                      setStoppingId(null);
+                    }
+                  }}
+                  className="flex-1 rounded-xl bg-red-600 hover:bg-red-700 py-2.5 text-sm font-semibold text-white transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {stoppingId === stopConfirmSchedule.id ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4 text-white" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                      <span>Stopping…</span>
+                    </>
+                  ) : (
+                    "Confirm"
+                  )}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </>
   );
 }

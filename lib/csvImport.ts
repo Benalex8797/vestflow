@@ -152,3 +152,89 @@ export const SCHEDULE_CSV_TEMPLATE =
   "beneficiary,amount,duration,cliff\n" +
   "GABC...EXAMPLE1,1000,365,90\n" +
   "GABC...EXAMPLE2,2500,730,180\n";
+
+// ─── Bulk Give CSV Parsing (#793) ──────────────────────────────────────────
+
+export interface ParsedBulkGiveRow {
+  lineNumber: number;
+  receiver: string;
+  amount: string;
+  addressError: string | null;
+  amountError: string | null;
+  isValid: boolean;
+}
+
+export interface ParsedBulkGiveCSV {
+  rows: ParsedBulkGiveRow[];
+  headerError: string | null;
+}
+
+export function parseBulkGiveCSV(text: string): ParsedBulkGiveCSV {
+  // Strip BOM if present for Excel compatibility
+  const cleanText = text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
+  // Handle CRLF, LF, and CR line endings
+  const lines = cleanText.split(/\r\n|\n|\r/).filter((line) => line.trim().length > 0);
+
+  if (lines.length === 0) {
+    return { rows: [], headerError: "The CSV file is empty." };
+  }
+
+  const firstCells = parseCSVLine(lines[0]).map((c) => c.trim().toLowerCase());
+  const hasHeader =
+    firstCells.some((c) => c.includes("receiver") || c.includes("recipient") || c.includes("address")) &&
+    firstCells.some((c) => c.includes("amount"));
+
+  let dataLines = lines;
+  let receiverIdx = 0;
+  let amountIdx = 1;
+
+  if (hasHeader) {
+    receiverIdx = firstCells.findIndex((c) => c.includes("receiver") || c.includes("recipient") || c.includes("address"));
+    amountIdx = firstCells.findIndex((c) => c.includes("amount"));
+    if (receiverIdx === -1) receiverIdx = 0;
+    if (amountIdx === -1) amountIdx = 1;
+    dataLines = lines.slice(1);
+  }
+
+  if (dataLines.length === 0) {
+    return { rows: [], headerError: "The CSV file has no data rows." };
+  }
+
+  const rows: ParsedBulkGiveRow[] = dataLines.map((line, i) => {
+    const cells = parseCSVLine(line);
+    const receiver = (cells[receiverIdx] ?? "").trim();
+    const amount = (cells[amountIdx] ?? "").trim().replace(/,/g, "");
+
+    let addressError: string | null = null;
+    if (!receiver) {
+      addressError = "Receiver address is required.";
+    } else if (!isValidStellarAddress(receiver)) {
+      addressError = "Must be a valid Stellar address starting with G (56 characters).";
+    }
+
+    let amountError: string | null = null;
+    const parsedAmount = parseFloat(amount);
+    if (!amount) {
+      amountError = "Amount is required.";
+    } else if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      amountError = "Amount must be a positive number.";
+    }
+
+    return {
+      lineNumber: hasHeader ? i + 2 : i + 1,
+      receiver,
+      amount,
+      addressError,
+      amountError,
+      isValid: !addressError && !amountError,
+    };
+  });
+
+  return { rows, headerError: null };
+}
+
+export const BULK_GIVE_CSV_TEMPLATE =
+  "receiver_address,amount_xlm\n" +
+  "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5,10.5\n" +
+  "GD6WU64OEP5C6LRBHINCMZTIVAKISPAAH6ISU2UOMNWCJAPUSOMUTMVX,25.0\n";
+

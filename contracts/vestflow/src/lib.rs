@@ -54,6 +54,9 @@ use soroban_sdk::{
 /// `Cargo.toml` at build time via `env!("CARGO_PKG_VERSION")`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Maximum split weight a single receiver can have (100% = 1_000_000 parts per million).
+pub const TOTAL_SPLITS_WEIGHT: u128 = 1_000_000;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -100,6 +103,8 @@ pub enum VestFlowError {
     ProofTooDeep = 33,
     /// StreamReceiver `amt_per_sec` or SplitsReceiver `weight` must be positive.
     WeightZero = 34,
+    /// SplitsReceiver `weight` exceeds TOTAL_SPLITS_WEIGHT.
+    WeightTooLarge = 35,
 }
 
 #[contracttype]
@@ -344,6 +349,9 @@ impl AddressSplitsReceiver {
         if self.weight == 0 {
             return Err(VestFlowError::WeightZero);
         }
+        if self.weight > TOTAL_SPLITS_WEIGHT {
+            return Err(VestFlowError::WeightTooLarge);
+        }
         Ok(())
     }
 
@@ -376,15 +384,14 @@ impl NftSplitsReceiver {
         if self.weight == 0 {
             return Err(VestFlowError::WeightZero);
         }
+        if self.weight > TOTAL_SPLITS_WEIGHT {
+            return Err(VestFlowError::WeightTooLarge);
+        }
         Ok(())
     }
 
     /// Create a new validated NftSplitsReceiver.
-    pub fn new(
-        nft_contract: Address,
-        token_id: u128,
-        weight: u128,
-    ) -> Result<Self, VestFlowError> {
+    pub fn new(nft_contract: Address, token_id: u128, weight: u128) -> Result<Self, VestFlowError> {
         let nft_receiver = Self {
             nft_contract,
             token_id,
@@ -3688,20 +3695,23 @@ impl VestFlowContract {
         token: Address,
     ) {
         sender.require_auth();
-        assert!(receivers.len() == amounts.len(), "Receivers and amounts length mismatch");
+        assert!(
+            receivers.len() == amounts.len(),
+            "Receivers and amounts length mismatch"
+        );
         assert!(!receivers.is_empty(), "Receivers must not be empty");
 
         let token_client = token::Client::new(&env, &token);
         for i in 0..receivers.len() {
-            let receiver = receivers.get(i).unwrap();
-            let amount = amounts.get(i).unwrap();
+            let receiver = receivers.get(i).expect("i < len");
+            let amount = amounts.get(i).expect("i < len");
             assert!(amount > 0, "Give amount must be positive");
             token_client.transfer(&sender, &receiver, &amount);
         }
         for i in 0..receivers.len() {
             env.events().publish(
                 (symbol_short!("given"), sender.clone(), token.clone()),
-                amounts.get(i).unwrap(),
+                amounts.get(i).expect("i < len"),
             );
         }
     }
@@ -4350,12 +4360,26 @@ impl VestFlowContract {
         for receiver in receivers.iter() {
             // Validate using the struct's validation method
             match &receiver {
-                SplitReceiver::Address(receiver) => {
-                    receiver.validate().expect("Split receiver weight must be positive");
-                }
-                SplitReceiver::Nft(receiver) => {
-                    receiver.validate().expect("Split receiver weight must be positive");
-                }
+                SplitReceiver::Address(receiver) => match receiver.validate() {
+                    Err(VestFlowError::WeightZero) => {
+                        panic!("Split receiver weight must be positive")
+                    }
+                    Err(VestFlowError::WeightTooLarge) => {
+                        panic!("Split receiver weight exceeds maximum")
+                    }
+                    Err(_) => panic!("Invalid split receiver weight"),
+                    Ok(()) => {}
+                },
+                SplitReceiver::Nft(receiver) => match receiver.validate() {
+                    Err(VestFlowError::WeightZero) => {
+                        panic!("Split receiver weight must be positive")
+                    }
+                    Err(VestFlowError::WeightTooLarge) => {
+                        panic!("Split receiver weight exceeds maximum")
+                    }
+                    Err(_) => panic!("Invalid split receiver weight"),
+                    Ok(()) => {}
+                },
             }
         }
         if receivers.is_empty() {
@@ -4808,7 +4832,8 @@ mod test {
     }
 
     fn create_token_contract(env: &Env, admin: &Address) -> Address {
-        env.register_stellar_asset_contract_v2(admin.clone()).address()
+        env.register_stellar_asset_contract_v2(admin.clone())
+            .address()
     }
 
     fn decode_strm_recv_topics(
@@ -10063,11 +10088,18 @@ mod test {
         // Check if any strm_recv event was emitted
         let events_after = env.events().all();
         let has_strm_recv = events_after.iter().any(|(_, topics, _)| {
-            topics.len() == 3 && decode_strm_recv_topics(&env, &topics).0 == symbol_short!("strm_recv")
+            topics.len() == 3
+                && decode_strm_recv_topics(&env, &topics).0 == symbol_short!("strm_recv")
         });
 
-        assert!(!has_strm_recv, "strm_recv event should not be emitted when cycles_processed = 0");
-        assert!(amount > 0, "Amount should still be positive even with 0 cycles");
+        assert!(
+            !has_strm_recv,
+            "strm_recv event should not be emitted when cycles_processed = 0"
+        );
+        assert!(
+            amount > 0,
+            "Amount should still be positive even with 0 cycles"
+        );
     }
 
     #[test]
@@ -10152,14 +10184,21 @@ mod test {
         let value: (u32, i128) = value.try_into_val(&env).unwrap();
 
         // Verify topics
-        assert_eq!(topics.0, symbol_short!("strm_recv"), "Event symbol should be strm_recv");
+        assert_eq!(
+            topics.0,
+            symbol_short!("strm_recv"),
+            "Event symbol should be strm_recv"
+        );
         assert_eq!(topics.1, funder, "First topic should be funder (account)");
         assert_eq!(topics.2, token_address, "Second topic should be token");
 
         // Verify value: { cycles_processed: u32, amount_received: i128 }
         let (cycles_processed, amount_received) = value;
         assert!(cycles_processed > 0, "cycles_processed should be u32 > 0");
-        assert_eq!(amount_received, amount, "amount_received should match returned amount");
+        assert_eq!(
+            amount_received, amount,
+            "amount_received should match returned amount"
+        );
     }
 
     // --- Issue #609: StreamReceiver and SplitsReceiver validation tests ---
@@ -10168,7 +10207,7 @@ mod test {
     fn test_stream_receiver_valid_config_accepted() {
         let env = Env::default();
         let receiver = Address::generate(&env);
-        
+
         // Valid configuration should succeed
         let stream_receiver = StreamReceiver::new(receiver.clone(), 100).unwrap();
         assert_eq!(stream_receiver.amt_per_sec, 100);
@@ -10179,7 +10218,7 @@ mod test {
     fn test_stream_receiver_zero_rate_rejected() {
         let env = Env::default();
         let receiver = Address::generate(&env);
-        
+
         // Zero rate should fail
         let result = StreamReceiver::new(receiver, 0);
         assert!(result.is_err());
@@ -10190,7 +10229,7 @@ mod test {
     fn test_stream_receiver_negative_rate_rejected() {
         let env = Env::default();
         let receiver = Address::generate(&env);
-        
+
         // Negative rate should fail
         let result = StreamReceiver::new(receiver, -100);
         assert!(result.is_err());
@@ -10243,7 +10282,7 @@ mod test {
     fn test_address_splits_receiver_valid_config_accepted() {
         let env = Env::default();
         let receiver = Address::generate(&env);
-        
+
         // Valid configuration should succeed
         let splits_receiver = AddressSplitsReceiver::new(receiver.clone(), 100).unwrap();
         assert_eq!(splits_receiver.weight, 100);
@@ -10254,7 +10293,7 @@ mod test {
     fn test_address_splits_receiver_zero_weight_rejected() {
         let env = Env::default();
         let receiver = Address::generate(&env);
-        
+
         // Zero weight should fail
         let result = AddressSplitsReceiver::new(receiver, 0);
         assert!(result.is_err());
@@ -10265,7 +10304,7 @@ mod test {
     fn test_nft_splits_receiver_valid_config_accepted() {
         let env = Env::default();
         let nft_contract = Address::generate(&env);
-        
+
         // Valid configuration should succeed
         let nft_receiver = NftSplitsReceiver::new(nft_contract.clone(), 123, 50).unwrap();
         assert_eq!(nft_receiver.weight, 50);
@@ -10277,7 +10316,7 @@ mod test {
     fn test_nft_splits_receiver_zero_weight_rejected() {
         let env = Env::default();
         let nft_contract = Address::generate(&env);
-        
+
         // Zero weight should fail
         let result = NftSplitsReceiver::new(nft_contract, 123, 0);
         assert!(result.is_err());
@@ -10326,6 +10365,112 @@ mod test {
     }
 
     #[test]
+    fn test_address_splits_receiver_max_weight_accepted() {
+        let env = Env::default();
+        let receiver = Address::generate(&env);
+
+        // Maximum weight (TOTAL_SPLITS_WEIGHT) should succeed
+        let splits_receiver =
+            AddressSplitsReceiver::new(receiver.clone(), TOTAL_SPLITS_WEIGHT).unwrap();
+        assert_eq!(splits_receiver.weight, TOTAL_SPLITS_WEIGHT);
+        assert_eq!(splits_receiver.receiver, receiver);
+    }
+
+    #[test]
+    fn test_address_splits_receiver_weight_too_large_rejected() {
+        let env = Env::default();
+        let receiver = Address::generate(&env);
+
+        // Weight exceeding TOTAL_SPLITS_WEIGHT should fail with WeightTooLarge
+        let result = AddressSplitsReceiver::new(receiver, TOTAL_SPLITS_WEIGHT + 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), VestFlowError::WeightTooLarge);
+    }
+
+    #[test]
+    fn test_nft_splits_receiver_max_weight_accepted() {
+        let env = Env::default();
+        let nft_contract = Address::generate(&env);
+
+        // Maximum weight (TOTAL_SPLITS_WEIGHT) should succeed
+        let nft_receiver =
+            NftSplitsReceiver::new(nft_contract.clone(), 42, TOTAL_SPLITS_WEIGHT).unwrap();
+        assert_eq!(nft_receiver.weight, TOTAL_SPLITS_WEIGHT);
+        assert_eq!(nft_receiver.token_id, 42);
+        assert_eq!(nft_receiver.nft_contract, nft_contract);
+    }
+
+    #[test]
+    fn test_nft_splits_receiver_weight_too_large_rejected() {
+        let env = Env::default();
+        let nft_contract = Address::generate(&env);
+
+        // Weight exceeding TOTAL_SPLITS_WEIGHT should fail with WeightTooLarge
+        let result = NftSplitsReceiver::new(nft_contract, 42, TOTAL_SPLITS_WEIGHT + 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), VestFlowError::WeightTooLarge);
+    }
+
+    #[test]
+    fn test_set_splits_accepts_max_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = VestFlowContractClient::new(&env, &env.register(VestFlowContract, ()));
+        let account = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let receivers_vec = vec![
+            &env,
+            SplitReceiver::Address(AddressSplitsReceiver {
+                receiver: receiver.clone(),
+                weight: TOTAL_SPLITS_WEIGHT,
+            }),
+        ];
+        client.set_splits(&account, &receivers_vec);
+        let stored = client.splits(&account);
+        assert_eq!(stored.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Split receiver weight exceeds maximum")]
+    fn test_set_splits_rejects_weight_too_large_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = VestFlowContractClient::new(&env, &env.register(VestFlowContract, ()));
+        let account = Address::generate(&env);
+        let receiver = Address::generate(&env);
+
+        let receivers_vec = vec![
+            &env,
+            SplitReceiver::Address(AddressSplitsReceiver {
+                receiver,
+                weight: TOTAL_SPLITS_WEIGHT + 1,
+            }),
+        ];
+        client.set_splits(&account, &receivers_vec);
+    }
+
+    #[test]
+    #[should_panic(expected = "Split receiver weight exceeds maximum")]
+    fn test_set_splits_rejects_weight_too_large_nft() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = VestFlowContractClient::new(&env, &env.register(VestFlowContract, ()));
+        let account = Address::generate(&env);
+        let nft_contract = Address::generate(&env);
+
+        let receivers_vec = vec![
+            &env,
+            SplitReceiver::Nft(NftSplitsReceiver {
+                nft_contract,
+                token_id: 1,
+                weight: TOTAL_SPLITS_WEIGHT + 1,
+            }),
+        ];
+        client.set_splits(&account, &receivers_vec);
+    }
+
+    #[test]
     fn test_structs_usable_from_sdk() {
         // This test verifies that StreamReceiver and SplitsReceiver structs
         // are properly exported and usable from SDK bindings
@@ -10343,7 +10488,7 @@ mod test {
             amt_per_sec: 100,
         };
         let receivers_vec = vec![&env, stream_receiver];
-        
+
         // Use in contract call
         client.set_stream(&funder, &token_address, &receivers_vec, &0);
 
@@ -10353,7 +10498,7 @@ mod test {
             weight: 50,
         };
         let splits_vec = vec![&env, SplitReceiver::Address(splits_receiver)];
-        
+
         // Use in contract call
         client.set_splits(&funder, &splits_vec);
 

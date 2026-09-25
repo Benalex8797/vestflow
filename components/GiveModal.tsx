@@ -10,6 +10,7 @@ import {
   clearGiveDraft,
   isDraftEmpty,
 } from "@/lib/giveDraft";
+import BulkGiveForm from "@/components/BulkGiveForm";
 
 interface GiveModalProps {
   open: boolean;
@@ -19,6 +20,7 @@ interface GiveModalProps {
 
 export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) {
   const { publicKey } = useWallet();
+  const [mode, setMode] = useState<"single" | "bulk">("single");
   const [amount, setAmount] = useState("");
   const [recipient, setRecipient] = useState("");
   const [loading, setLoading] = useState(false);
@@ -137,49 +139,89 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
     >
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl">
-        <div className="flex items-center justify-between mb-5">
+      <div className={`relative z-10 w-full ${mode === "bulk" ? "max-w-xl" : "max-w-md"} rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl transition-all`}>
+        <div className="flex items-center justify-between mb-4">
           <div>
             <h2 className="text-lg font-bold">Give Tokens</h2>
-            <p className="text-sm text-zinc-400">Send vested tokens to another address</p>
+            <p className="text-sm text-zinc-400">
+              {mode === "bulk"
+                ? "Upload CSV to send tokens to multiple addresses at once"
+                : "Send vested tokens to another address"}
+            </p>
           </div>
           <button onClick={onClose} className="flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors shrink-0 min-h-[44px] min-w-[44px] -mr-2" aria-label="Close">
             ✕
           </button>
         </div>
 
-        {pendingDraft && (
-          <div
-            role="alertdialog"
-            aria-label="Restore draft"
-            className="mb-4 rounded-xl border border-violet-500/30 bg-violet-500/10 p-3 text-sm"
+        {/* Mode selector (#793) */}
+        <div className="flex border-b border-white/10 mb-5">
+          <button
+            type="button"
+            onClick={() => setMode("single")}
+            className={`pb-2.5 px-3 text-xs font-semibold border-b-2 transition-colors ${
+              mode === "single"
+                ? "border-violet-500 text-violet-300"
+                : "border-transparent text-zinc-400 hover:text-zinc-200"
+            }`}
           >
-            <p className="font-medium text-violet-200">Restore draft?</p>
-            <p className="mt-1 text-xs text-zinc-400 break-all">
-              {pendingDraft.amount ? `${pendingDraft.amount} XLM` : "No amount"}
-              {pendingDraft.receiver ? ` → ${pendingDraft.receiver.slice(0, 10)}…${pendingDraft.receiver.slice(-6)}` : ""}
-              {" · saved "}{new Date(pendingDraft.savedAt).toLocaleString()}
-            </p>
-            <div className="mt-3 flex gap-2">
-              <button
-                type="button"
-                onClick={handleRestoreDraft}
-                className="flex-1 min-h-[36px] rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white transition-colors"
-              >
-                Restore
-              </button>
-              <button
-                type="button"
-                onClick={handleDiscardDraft}
-                className="flex-1 min-h-[36px] rounded-lg border border-white/10 text-xs font-semibold text-zinc-300 hover:border-white/20 transition-colors"
-              >
-                Discard
-              </button>
-            </div>
-          </div>
-        )}
+            Single Give
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("bulk")}
+            className={`pb-2.5 px-3 text-xs font-semibold border-b-2 transition-colors ${
+              mode === "bulk"
+                ? "border-violet-500 text-violet-300"
+                : "border-transparent text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Bulk Give (CSV)
+          </button>
+        </div>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        {mode === "bulk" ? (
+          <BulkGiveForm
+            onSuccess={() => {
+              onSuccess();
+              onClose();
+            }}
+            onCancel={onClose}
+          />
+        ) : (
+          <>
+            {pendingDraft && (
+              <div
+                role="alertdialog"
+                aria-label="Restore draft"
+                className="mb-4 rounded-xl border border-violet-500/30 bg-violet-500/10 p-3 text-sm"
+              >
+                <p className="font-medium text-violet-200">Restore draft?</p>
+                <p className="mt-1 text-xs text-zinc-400 break-all">
+                  {pendingDraft.amount ? `${pendingDraft.amount} XLM` : "No amount"}
+                  {pendingDraft.receiver ? ` → ${pendingDraft.receiver.slice(0, 10)}…${pendingDraft.receiver.slice(-6)}` : ""}
+                  {" · saved "}{new Date(pendingDraft.savedAt).toLocaleString()}
+                </p>
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRestoreDraft}
+                    className="flex-1 min-h-[36px] rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white transition-colors"
+                  >
+                    Restore
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDiscardDraft}
+                    className="flex-1 min-h-[36px] rounded-lg border border-white/10 text-xs font-semibold text-zinc-300 hover:border-white/20 transition-colors"
+                  >
+                    Discard
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div>
             <label className="text-sm text-zinc-400">Recipient Address</label>
             <input
@@ -230,6 +272,8 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
             </button>
           </div>
         </form>
+        </>
+        )}
       </div>
     </div>
   );
