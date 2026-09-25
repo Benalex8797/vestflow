@@ -672,8 +672,19 @@ function handleAnalyticsCycles(
   const account = searchParams.get("account") ?? undefined;
   const token = searchParams.get("token") ?? undefined;
   const limit = numParam(searchParams, "limit");
+  const from = numParam(searchParams, "from");
+  const to = numParam(searchParams, "to");
+  const cursor = searchParams.get("cursor") ?? undefined;
 
-  const cycles = queryStreamCycles({ account, token, limit, network });
+  const cycles = queryStreamCycles({
+    account,
+    token,
+    limit,
+    from,
+    to,
+    cursor,
+    network,
+  });
   return json(res, 200, { cycles });
 }
 
